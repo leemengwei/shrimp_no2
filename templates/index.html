@@ -1,0 +1,763 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Polymarket 实时市场数据</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+            padding: 20px;
+        }
+
+        .container {
+            max-width: 1400px;
+            margin: 0 auto;
+        }
+
+        header {
+            text-align: center;
+            color: white;
+            margin-bottom: 40px;
+            animation: slideDown 0.5s ease-out;
+        }
+
+        header h1 {
+            font-size: 2.5em;
+            margin-bottom: 10px;
+            text-shadow: 2px 2px 4px rgba(0, 0, 0, 0.3);
+        }
+
+        header p {
+            font-size: 1.1em;
+            opacity: 0.9;
+        }
+
+        .controls {
+            display: flex;
+            justify-content: center;
+            gap: 15px;
+            margin-bottom: 30px;
+            flex-wrap: wrap;
+        }
+
+        .btn {
+            padding: 10px 20px;
+            border: none;
+            border-radius: 25px;
+            background: white;
+            color: #667eea;
+            font-weight: 600;
+            cursor: pointer;
+            transition: all 0.3s ease;
+            box-shadow: 0 4px 15px rgba(0, 0, 0, 0.2);
+        }
+
+        .btn:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 6px 20px rgba(0, 0, 0, 0.3);
+        }
+
+        .btn:active {
+            transform: translateY(0);
+        }
+
+        .btn.loading {
+            opacity: 0.7;
+            pointer-events: none;
+        }
+
+        .stats {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+            gap: 20px;
+            margin-bottom: 30px;
+        }
+
+        .stat-card {
+            background: white;
+            padding: 20px;
+            border-radius: 15px;
+            box-shadow: 0 4px 15px rgba(0, 0, 0, 0.1);
+            animation: fadeIn 0.5s ease-out;
+        }
+
+        .stat-card h3 {
+            color: #667eea;
+            font-size: 0.9em;
+            text-transform: uppercase;
+            margin-bottom: 10px;
+            opacity: 0.7;
+        }
+
+        .stat-card p {
+            font-size: 1.8em;
+            font-weight: bold;
+            color: #333;
+        }
+
+        .stat-card span {
+            font-size: 0.85em;
+            color: #999;
+            margin-top: 10px;
+            display: block;
+        }
+
+        .markets-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fill, minmax(350px, 1fr));
+            gap: 20px;
+            animation: fadeIn 0.5s ease-out;
+        }
+
+        .market-card {
+            background: white;
+            border-radius: 15px;
+            padding: 25px;
+            box-shadow: 0 4px 15px rgba(0, 0, 0, 0.1);
+            transition: all 0.3s ease;
+            animation: slideUp 0.5s ease-out;
+            border-left: 5px solid #667eea;
+        }
+
+        .market-card:hover {
+            transform: translateY(-5px);
+            box-shadow: 0 8px 25px rgba(0, 0, 0, 0.15);
+        }
+
+        .market-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: start;
+            margin-bottom: 15px;
+        }
+
+        .market-title {
+            font-size: 1.2em;
+            font-weight: 600;
+            color: #333;
+            flex: 1;
+            margin-right: 10px;
+            line-height: 1.4;
+        }
+
+        .market-status {
+            padding: 5px 12px;
+            border-radius: 20px;
+            font-size: 0.8em;
+            font-weight: 600;
+            white-space: nowrap;
+        }
+
+        .status-active {
+            background: #d4edda;
+            color: #155724;
+        }
+
+        .status-closed {
+            background: #f8d7da;
+            color: #721c24;
+        }
+
+        .outcomes {
+            margin: 20px 0;
+            padding: 15px;
+            background: #f8f9fa;
+            border-radius: 10px;
+        }
+
+        .outcome-item {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 10px 0;
+            border-bottom: 1px solid #e9ecef;
+        }
+
+        .outcome-item:last-child {
+            border-bottom: none;
+        }
+
+        .outcome-name {
+            font-weight: 500;
+            color: #555;
+        }
+
+        .outcome-price {
+            font-size: 1.2em;
+            font-weight: bold;
+            color: #667eea;
+        }
+
+        .price-display {
+            margin: 20px 0;
+            padding: 15px;
+            background: linear-gradient(135deg, #667eea15 0%, #764ba215 100%);
+            border-radius: 10px;
+            border-left: 4px solid #667eea;
+        }
+
+        .price-row {
+            display: flex;
+            justify-content: space-between;
+            padding: 8px 0;
+            color: #555;
+        }
+
+        .price-label {
+            font-weight: 600;
+        }
+
+        .price-value {
+            font-weight: bold;
+            color: #667eea;
+        }
+
+        .volume-info {
+            margin: 15px 0;
+            padding: 10px;
+            background: #f0f0f0;
+            border-radius: 8px;
+            font-size: 0.95em;
+            color: #666;
+        }
+
+        .volume-bar {
+            width: 100%;
+            height: 6px;
+            background: #e0e0e0;
+            border-radius: 3px;
+            margin-top: 5px;
+            overflow: hidden;
+        }
+
+        .volume-fill {
+            height: 100%;
+            background: linear-gradient(90deg, #667eea, #764ba2);
+            border-radius: 3px;
+            transition: width 0.3s ease;
+        }
+
+        .action-buttons {
+            display: flex;
+            gap: 10px;
+            margin-top: 15px;
+        }
+
+        .btn-small {
+            flex: 1;
+            padding: 8px 12px;
+            font-size: 0.9em;
+            border: 2px solid #667eea;
+            background: white;
+            color: #667eea;
+            border-radius: 8px;
+            cursor: pointer;
+            transition: all 0.3s ease;
+            font-weight: 600;
+        }
+
+        .btn-small:hover {
+            background: #667eea;
+            color: white;
+        }
+
+        .loading {
+            text-align: center;
+            padding: 40px;
+            color: white;
+            font-size: 1.1em;
+        }
+
+        .spinner {
+            display: inline-block;
+            width: 30px;
+            height: 30px;
+            border: 4px solid rgba(255, 255, 255, 0.3);
+            border-top-color: white;
+            border-radius: 50%;
+            animation: spin 1s linear infinite;
+            margin-right: 10px;
+            vertical-align: middle;
+        }
+
+        @keyframes spin {
+            to { transform: rotate(360deg); }
+        }
+
+        .error-message {
+            background: #f8d7da;
+            color: #721c24;
+            padding: 15px;
+            border-radius: 10px;
+            margin-bottom: 20px;
+            border-left: 4px solid #721c24;
+        }
+
+        .success-message {
+            background: #d4edda;
+            color: #155724;
+            padding: 15px;
+            border-radius: 10px;
+            margin-bottom: 20px;
+            border-left: 4px solid #155724;
+        }
+
+        .orderbook-modal {
+            display: none;
+            position: fixed;
+            z-index: 1000;
+            left: 0;
+            top: 0;
+            width: 100%;
+            height: 100%;
+            background: rgba(0, 0, 0, 0.5);
+            animation: fadeIn 0.3s ease;
+        }
+
+        .modal-content {
+            background: white;
+            margin: 5% auto;
+            padding: 30px;
+            border-radius: 15px;
+            width: 90%;
+            max-width: 600px;
+            max-height: 80vh;
+            overflow-y: auto;
+            box-shadow: 0 10px 40px rgba(0, 0, 0, 0.3);
+        }
+
+        .modal-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 20px;
+        }
+
+        .modal-header h2 {
+            color: #667eea;
+            font-size: 1.5em;
+        }
+
+        .close-btn {
+            font-size: 2em;
+            font-weight: bold;
+            color: #999;
+            cursor: pointer;
+            background: none;
+            border: none;
+            line-height: 1;
+        }
+
+        .close-btn:hover {
+            color: #333;
+        }
+
+        .orderbook-section {
+            margin: 20px 0;
+        }
+
+        .orderbook-section h3 {
+            color: #667eea;
+            margin-bottom: 10px;
+            font-size: 1.1em;
+        }
+
+        .orderbook-table {
+            width: 100%;
+            border-collapse: collapse;
+            font-size: 0.9em;
+        }
+
+        .orderbook-table th {
+            background: #f0f0f0;
+            padding: 8px;
+            text-align: right;
+            font-weight: 600;
+            color: #555;
+        }
+
+        .orderbook-table td {
+            padding: 8px;
+            text-align: right;
+            border-bottom: 1px solid #eee;
+        }
+
+        .orderbook-table td:first-child {
+            text-align: left;
+        }
+
+        @media (max-width: 768px) {
+            header h1 {
+                font-size: 1.8em;
+            }
+
+            .markets-grid {
+                grid-template-columns: 1fr;
+            }
+
+            .stat-card p {
+                font-size: 1.4em;
+            }
+        }
+
+        @keyframes slideDown {
+            from {
+                opacity: 0;
+                transform: translateY(-20px);
+            }
+            to {
+                opacity: 1;
+                transform: translateY(0);
+            }
+        }
+
+        @keyframes slideUp {
+            from {
+                opacity: 0;
+                transform: translateY(20px);
+            }
+            to {
+                opacity: 1;
+                transform: translateY(0);
+            }
+        }
+
+        @keyframes fadeIn {
+            from {
+                opacity: 0;
+            }
+            to {
+                opacity: 1;
+            }
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <header>
+            <h1>📊 Polymarket 实时市场数据</h1>
+            <p>实时获取预测市场价格和交易深度</p>
+        </header>
+
+        <div class="controls">
+            <button class="btn" onclick="refreshData()">🔄 刷新数据</button>
+            <button class="btn" onclick="toggleAutoRefresh()">⏸ 自动刷新</button>
+            <button class="btn" onclick="location.reload()">🔁 重新加载</button>
+        </div>
+
+        <div class="stats">
+            <div class="stat-card">
+                <h3>市场数量</h3>
+                <p id="markets-count">0</p>
+                <span id="last-update">最后更新: --</span>
+            </div>
+            <div class="stat-card">
+                <h3>更新次数</h3>
+                <p id="update-count">0</p>
+            </div>
+            <div class="stat-card">
+                <h3>自动刷新</h3>
+                <p id="refresh-status">启用 ✓</p>
+                <span id="refresh-interval">10秒更新一次</span>
+            </div>
+        </div>
+
+        <div id="message-container"></div>
+
+        <div id="markets-container" class="markets-grid">
+            <div class="loading">
+                <span class="spinner"></span>
+                正在加载市场数据...
+            </div>
+        </div>
+    </div>
+
+    <!-- 订单簿模态框 -->
+    <div id="orderbook-modal" class="orderbook-modal">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h2>订单簿详情</h2>
+                <button class="close-btn" onclick="closeOrderbook()">&times;</button>
+            </div>
+            <div id="orderbook-content"></div>
+        </div>
+    </div>
+
+    <script>
+        const API_BASE = '/api';
+        let autoRefreshEnabled = true;
+        let autoRefreshInterval = null;
+        const REFRESH_INTERVAL = 10000; // 10秒
+
+        // ============================================
+        // 数据刷新
+        // ============================================
+
+        async function refreshData() {
+            try {
+                const btn = event.target;
+                btn.classList.add('loading');
+                btn.textContent = '加载中...';
+
+                const response = await fetch(`${API_BASE}/markets`);
+                const result = await response.json();
+
+                if (result.success) {
+                    displayMarkets(result.data);
+                    updateStats(result);
+                    showMessage('数据刷新成功！', 'success');
+                } else {
+                    showMessage('获取数据失败: ' + result.error, 'error');
+                }
+            } catch (error) {
+                showMessage('错误: ' + error.message, 'error');
+            } finally {
+                const btn = event.target;
+                btn.classList.remove('loading');
+                btn.textContent = '🔄 刷新数据';
+            }
+        }
+
+        function displayMarkets(markets) {
+            const container = document.getElementById('markets-container');
+            
+            if (markets.length === 0) {
+                container.innerHTML = '<div class="loading">未找到活跃市场</div>';
+                return;
+            }
+
+            container.innerHTML = markets.map((market, index) => {
+                const [buyPrice, sellPrice] = calculatePriceSpread(market);
+                const volumePercent = Math.min((market.volume / 1000000) * 100, 100);
+
+                return `
+                    <div class="market-card" style="animation-delay: ${index * 0.1}s">
+                        <div class="market-header">
+                            <div class="market-title">${market.question}</div>
+                            <span class="market-status ${market.active ? 'status-active' : 'status-closed'}">
+                                ${market.active ? '活跃' : '已关闭'}
+                            </span>
+                        </div>
+
+                        <div class="outcomes">
+                            ${market.outcomes.map((outcome, i) => `
+                                <div class="outcome-item">
+                                    <span class="outcome-name">${outcome}</span>
+                                    <span class="outcome-price">${(market.prices[i] * 100).toFixed(1)}%</span>
+                                </div>
+                            `).join('')}
+                        </div>
+
+                        <div class="price-display">
+                            <div class="price-row">
+                                <span class="price-label">买入价:</span>
+                                <span class="price-value">${buyPrice}</span>
+                            </div>
+                            <div class="price-row">
+                                <span class="price-label">卖出价:</span>
+                                <span class="price-value">${sellPrice}</span>
+                            </div>
+                            <div class="price-row">
+                                <span class="price-label">价差:</span>
+                                <span class="price-value">${calculateSpread(buyPrice, sellPrice)}</span>
+                            </div>
+                        </div>
+
+                        <div class="volume-info">
+                            📈 交易量: $${(market.volume / 1000000).toFixed(2)}M
+                            <div class="volume-bar">
+                                <div class="volume-fill" style="width: ${volumePercent}%"></div>
+                            </div>
+                        </div>
+
+                        <div class="action-buttons">
+                            <button class="btn-small" onclick="viewOrderbook('${market.token_id || 'N/A'}', '${market.question.replace(/'/g, "\\'")}')">
+                                📊 查看订单簿
+                            </button>
+                        </div>
+                    </div>
+                `;
+            }).join('');
+        }
+
+        function calculatePriceSpread(market) {
+            let buyPrice = market.buy_price || market.prices[0] || '0.00';
+            let sellPrice = market.sell_price || market.prices[1] || '1.00';
+            
+            return [
+                parseFloat(buyPrice).toFixed(3),
+                parseFloat(sellPrice).toFixed(3)
+            ];
+        }
+
+        function calculateSpread(buyPrice, sellPrice) {
+            const spread = parseFloat(sellPrice) - parseFloat(buyPrice);
+            return spread.toFixed(3);
+        }
+
+        function updateStats(result) {
+            document.getElementById('markets-count').textContent = result.data.length;
+            document.getElementById('update-count').textContent = result.update_count;
+            
+            const updateTime = new Date(result.timestamp).toLocaleTimeString('zh-CN');
+            document.getElementById('last-update').textContent = `最后更新: ${updateTime}`;
+        }
+
+        // ============================================
+        // 自动刷新
+        // ============================================
+
+        function toggleAutoRefresh() {
+            autoRefreshEnabled = !autoRefreshEnabled;
+            const btn = event.target;
+
+            if (autoRefreshEnabled) {
+                btn.textContent = '⏸ 自动刷新';
+                document.getElementById('refresh-status').textContent = '启用 ✓';
+                startAutoRefresh();
+            } else {
+                btn.textContent = '▶ 自动刷新';
+                document.getElementById('refresh-status').textContent = '禁用 ✗';
+                stopAutoRefresh();
+            }
+        }
+
+        function startAutoRefresh() {
+            if (autoRefreshInterval) clearInterval(autoRefreshInterval);
+            
+            autoRefreshInterval = setInterval(() => {
+                fetch(`${API_BASE}/markets`)
+                    .then(res => res.json())
+                    .then(result => {
+                        if (result.success) {
+                            displayMarkets(result.data);
+                            updateStats(result);
+                        }
+                    })
+                    .catch(console.error);
+            }, REFRESH_INTERVAL);
+        }
+
+        function stopAutoRefresh() {
+            if (autoRefreshInterval) {
+                clearInterval(autoRefreshInterval);
+                autoRefreshInterval = null;
+            }
+        }
+
+        // ============================================
+        // 订单簿
+        // ============================================
+
+        async function viewOrderbook(tokenId, marketTitle) {
+            if (tokenId === 'N/A') {
+                showMessage('此市场暂无可用的 Token ID', 'error');
+                return;
+            }
+
+            try {
+                const modal = document.getElementById('orderbook-modal');
+                const content = document.getElementById('orderbook-content');
+                content.innerHTML = '<div class="loading"><span class="spinner"></span>加载订单簿...</div>';
+                modal.style.display = 'block';
+
+                const response = await fetch(`${API_BASE}/orderbook/${tokenId}`);
+                const result = await response.json();
+
+                if (result.success) {
+                    const orderbook = result.data;
+                    content.innerHTML = `
+                        <p style="color: #666; margin-bottom: 20px;">${marketTitle}</p>
+                        
+                        <div class="orderbook-section">
+                            <h3>💰 买单 (Bids)</h3>
+                            <table class="orderbook-table">
+                                <tr>
+                                    <th>价格</th>
+                                    <th>数量</th>
+                                </tr>
+                                ${(orderbook.bids || []).slice(0, 10).map(bid => `
+                                    <tr>
+                                        <td>${parseFloat(bid.price).toFixed(4)}</td>
+                                        <td>${parseFloat(bid.size).toFixed(2)}</td>
+                                    </tr>
+                                `).join('')}
+                            </table>
+                        </div>
+
+                        <div class="orderbook-section">
+                            <h3>📊 卖单 (Asks)</h3>
+                            <table class="orderbook-table">
+                                <tr>
+                                    <th>价格</th>
+                                    <th>数量</th>
+                                </tr>
+                                ${(orderbook.asks || []).slice(0, 10).map(ask => `
+                                    <tr>
+                                        <td>${parseFloat(ask.price).toFixed(4)}</td>
+                                        <td>${parseFloat(ask.size).toFixed(2)}</td>
+                                    </tr>
+                                `).join('')}
+                            </table>
+                        </div>
+                    `;
+                } else {
+                    content.innerHTML = '<p>获取订单簿失败</p>';
+                }
+            } catch (error) {
+                document.getElementById('orderbook-content').innerHTML = '<p>错误: ' + error.message + '</p>';
+            }
+        }
+
+        function closeOrderbook() {
+            document.getElementById('orderbook-modal').style.display = 'none';
+        }
+
+        // ============================================
+        // 消息通知
+        // ============================================
+
+        function showMessage(text, type) {
+            const container = document.getElementById('message-container');
+            const className = type === 'success' ? 'success-message' : 'error-message';
+            
+            const msg = document.createElement('div');
+            msg.className = className;
+            msg.textContent = text;
+            container.appendChild(msg);
+
+            setTimeout(() => msg.remove(), 5000);
+        }
+
+        // ============================================
+        // 页面加载
+        // ============================================
+
+        window.addEventListener('load', () => {
+            refreshData();
+            startAutoRefresh();
+        });
+
+        window.addEventListener('beforeunload', () => {
+            stopAutoRefresh();
+        });
+
+        // 点击模态框外部关闭
+        window.onclick = function(event) {
+            const modal = document.getElementById('orderbook-modal');
+            if (event.target === modal) {
+                modal.style.display = 'none';
+            }
+        };
+    </script>
+</body>
+</html>
