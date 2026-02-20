@@ -1,0 +1,6 @@
+.venv/
+field_ops/state.json
+field_ops/report.md
+field_ops/clob_snapshot.json
+__pycache__/
+*.jsonl

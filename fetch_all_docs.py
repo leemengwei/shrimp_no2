@@ -2,9 +2,9 @@ import os
 import re
 from urllib.parse import urlparse
 from urllib.request import Request, urlopen
-
+# 文件路径
 src_path = '/home/feifeichouchou/shrimp_no2/docs_for_all_references'
-base_dir = '/home/feifeichouchou/shrimp_no2/docs'
+base_dir = '/home/feifeichouchou/shrimp_no2/docs_tmp'
 verbose = True
 
 with open(src_path, 'r', encoding='utf-8') as f:
@@ -45,3 +45,5 @@ if errors:
     print('Failures:')
     for url, err in errors:
         print('- {}: {}'.format(url, err))
+
+
