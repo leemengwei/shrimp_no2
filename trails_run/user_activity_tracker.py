@@ -42,6 +42,7 @@ BACKFILL_SLEEP = 0.1
 BACKFILL_PROGRESS_EVERY = 5.0
 BACKFILL_PROGRESS_ITEMS = 1000
 BACKFILL_MAX_OFFSET = 3000
+BACKFILL_RESUME_WINDOW = 3600
 BACKFILL_START = 0
 BACKFILL_END = 0
 
@@ -352,6 +353,33 @@ def load_existing_entry_fingerprints(log_path):
     return fingerprints
 
 
+def load_latest_logged_timestamp(log_path):
+    latest_ts = None
+    if not os.path.exists(log_path):
+        return None
+    try:
+        with open(log_path, "r", encoding="utf-8") as handle:
+            for line in handle:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    entry = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if not isinstance(entry, dict):
+                    continue
+                event_time = entry.get("eventTimeLocal")
+                ts = parse_iso_timestamp(event_time)
+                if ts is None:
+                    continue
+                if latest_ts is None or ts > latest_ts:
+                    latest_ts = ts
+    except OSError as exc:
+        log_error(f"failed to read log file {log_path}: {exc}")
+    return latest_ts
+
+
 def user_log_path(base_path, username):
     safe_name = "".join(ch if ch.isalnum() or ch in ("-", "_", ".") else "_" for ch in username)
     root, ext = os.path.splitext(base_path)
@@ -507,13 +535,18 @@ def main():
                 loaded_log = True
 
             if BACKFILL_ON_START and not backfill_done:
+                resume_start = BACKFILL_START
+                if resume_start <= 0:
+                    latest_ts = load_latest_logged_timestamp(per_user_log_path)
+                    if latest_ts is not None:
+                        resume_start = max(0, int(latest_ts) - BACKFILL_RESUME_WINDOW)
                 backfill_activity_stream(
                     args.user_id,
                     username,
                     per_user_log_path,
                     seen,
                     written_entries,
-                    BACKFILL_START,
+                    resume_start,
                     BACKFILL_END,
                 )
                 backfill_done = True

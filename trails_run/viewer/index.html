@@ -1,0 +1,181 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Trails Run JSONL Viewer</title>
+    <link rel="stylesheet" href="/viewer/styles.css" />
+  </head>
+  <body>
+    <header class="hero">
+      <div>
+        <p class="eyebrow">Trails Run</p>
+        <h1>JSONL Activity Explorer</h1>
+        <p class="subtitle">Browse, filter, and summarize activity logs in your browser.</p>
+      </div>
+      <div class="hero-card">
+        <div class="metric">
+          <span class="metric-label">Total scanned</span>
+          <span id="stat-scanned" class="metric-value">-</span>
+        </div>
+        <div class="metric">
+          <span class="metric-label">Matched</span>
+          <span id="stat-matched" class="metric-value">-</span>
+        </div>
+        <div class="metric">
+          <span class="metric-label">Shown</span>
+          <span id="stat-shown" class="metric-value">-</span>
+        </div>
+      </div>
+    </header>
+
+    <main class="layout">
+      <section>
+        <details class="panel collapsible">
+          <summary>Filters</summary>
+          <div class="panel-body">
+            <div class="field-group" id="file-list">
+              <label for="file-select">User file</label>
+              <select id="file-select"></select>
+            </div>
+
+            <div class="grid-2">
+              <label class="field">
+                <span>Action</span>
+                <input id="filter-action" type="text" placeholder="e.g. TRADE" />
+              </label>
+              <label class="field">
+                <span>Side</span>
+                <input id="filter-side" type="text" placeholder="BUY / SELL" />
+              </label>
+              <label class="field">
+                <span>Outcome</span>
+                <input id="filter-outcome" type="text" placeholder="Yes / No" />
+              </label>
+              <label class="field">
+                <span>Type</span>
+                <input id="filter-type" type="text" placeholder="activity" />
+              </label>
+            </div>
+
+            <div class="grid-2">
+              <label class="field">
+                <span>Cum outcome A</span>
+                <input id="cum-outcome-a" type="text" placeholder="Yes" value="Yes" />
+              </label>
+              <label class="field">
+                <span>Cum outcome B</span>
+                <input id="cum-outcome-b" type="text" placeholder="No" value="No" />
+              </label>
+            </div>
+
+            <label class="field">
+              <span>Market</span>
+              <input id="filter-market" type="text" placeholder="Exact market name" />
+            </label>
+
+            <label class="field">
+              <span>Search</span>
+              <input id="filter-q" type="text" placeholder="Keyword in market/outcome/action" />
+            </label>
+
+            <div class="grid-2">
+              <label class="field">
+                <span>Start</span>
+                <input id="filter-start" type="datetime-local" />
+              </label>
+              <label class="field">
+                <span>End</span>
+                <input id="filter-end" type="datetime-local" />
+              </label>
+            </div>
+
+            <div class="grid-2">
+              <label class="field">
+                <span>Max rows</span>
+                <input id="filter-limit" type="number" min="100" max="20000" value="5000" />
+              </label>
+              <label class="field">
+                <span>Quick mode</span>
+                <div class="switch">
+                  <input id="filter-fast" type="checkbox" checked />
+                  <span>Stop after max rows</span>
+                </div>
+              </label>
+              <label class="field">
+                <span>&nbsp;</span>
+                <button id="load-btn" class="primary" type="button">Load Records</button>
+              </label>
+            </div>
+
+            <div class="actions">
+              <button id="clear-btn" type="button">Clear Filters</button>
+              <button id="export-btn" type="button">Export CSV</button>
+            </div>
+          </div>
+        </details>
+      </section>
+
+      <section>
+        <details class="panel collapsible">
+          <summary>
+            <span>Summary</span>
+            <span id="status" class="status">Ready.</span>
+          </summary>
+          <div class="panel-body">
+            <div class="summary-grid">
+              <div class="summary-card">
+                <h3>Totals</h3>
+                <dl>
+                  <div><dt>Net size</dt><dd id="sum-size">-</dd></div>
+                  <div><dt>Net notional</dt><dd id="sum-notional">-</dd></div>
+                  <div><dt>Avg price</dt><dd id="avg-price">-</dd></div>
+                </dl>
+              </div>
+              <div class="summary-card">
+                <h3>By action</h3>
+                <ul id="count-action"></ul>
+              </div>
+              <div class="summary-card">
+                <h3>By side</h3>
+                <ul id="count-side"></ul>
+              </div>
+              <div class="summary-card">
+                <h3>Net by outcome</h3>
+                <ul id="net-outcome"></ul>
+              </div>
+            </div>
+          </div>
+        </details>
+      </section>
+
+      <section class="panel">
+        <div class="panel-header">
+          <h2>Records</h2>
+          <span id="table-info" class="status">No data.</span>
+        </div>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>Time</th>
+                <th>Market</th>
+                <th>Side</th>
+                <th>Outcome</th>
+                <th>Price</th>
+                <th>Size</th>
+                <th>Action</th>
+                <th>Type</th>
+                <th id="cum-header-a">Cum Size (Yes)</th>
+                <th id="cum-header-b">Cum Size (No)</th>
+              </tr>
+            </thead>
+            <tbody id="records-body"></tbody>
+          </table>
+        </div>
+      </section>
+    </main>
+
+    <script src="/viewer/app.js"></script>
+  </body>
+</html>
