@@ -16,6 +16,7 @@ import json
 import os
 import re
 import time
+from datetime import datetime
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -33,6 +34,10 @@ ENDPOINT_MAX_LIMITS = {
 }
 
 
+def log(message: str) -> None:
+    print(message, flush=True)
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Collect Polymarket user activity using official public endpoints."
@@ -45,6 +50,15 @@ def parse_args() -> argparse.Namespace:
         "--no-progress",
         action="store_true",
         help="Disable progress printing",
+    )
+    parser.add_argument(
+        "--recent",
+        nargs="?",
+        type=int,
+        const=24,
+        default=None,
+        metavar="HOURS",
+        help="Fetch only recent data for all endpoints; optionally set hours (e.g. --recent 48)",
     )
     return parser.parse_args()
 
@@ -71,7 +85,7 @@ def http_get_json(
     while True:
         try:
             if attempt > 0:
-                print(f"[retry] attempt={attempt} url={url}")
+                log(f"[retry] attempt={attempt} url={url}")
             with urllib.request.urlopen(req, timeout=30) as resp:
                 body = resp.read().decode("utf-8")
                 return json.loads(body)
@@ -83,11 +97,11 @@ def http_get_json(
             OSError,
         ) as exc:
             last_err = exc
-            print(f"[error] attempt={attempt} url={url} err={exc}")
+            log(f"[error] attempt={attempt} url={url} err={exc}")
             if retries is not None and attempt >= retries:
                 break
             sleep_s = retry_backoff ** attempt
-            print(f"[backoff] sleep={sleep_s:.2f}s url={url}")
+            log(f"[backoff] sleep={sleep_s:.2f}s url={url}")
             time.sleep(sleep_s)
             attempt += 1
     raise RuntimeError(
@@ -104,10 +118,10 @@ def safe_get_json(
     try:
         return http_get_json(url, params, retries=retries, retry_backoff=retry_backoff)
     except urllib.error.HTTPError as exc:
-        print(f"[http_error] url={exc.geturl()} status={exc.code}")
+        log(f"[http_error] url={exc.geturl()} status={exc.code}")
         return {"_error": f"HTTP {exc.code}", "_url": exc.geturl()}
     except Exception as exc:  # noqa: BLE001
-        print(f"[exception] url={url} err={exc}")
+        log(f"[exception] url={url} err={exc}")
         return {"_error": str(exc), "_url": url}
 
 
@@ -123,11 +137,72 @@ def extract_min_max_ts(rows: List[Any]) -> Tuple[Optional[int], Optional[int]]:
     min_ts: Optional[int] = None
     max_ts: Optional[int] = None
     for row in rows:
-        if isinstance(row, dict) and isinstance(row.get("timestamp"), (int, float)):
-            ts = int(row["timestamp"])
+        ts = row_timestamp(row)
+        if ts is not None:
             min_ts = ts if min_ts is None else min(min_ts, ts)
             max_ts = ts if max_ts is None else max(max_ts, ts)
     return min_ts, max_ts
+
+
+def normalize_unix_ts(raw_ts: int) -> int:
+    # Normalize milliseconds/microseconds to seconds.
+    if raw_ts > 10_000_000_000_000:
+        return raw_ts // 1_000_000
+    if raw_ts > 10_000_000_000:
+        return raw_ts // 1_000
+    return raw_ts
+
+
+def parse_time_value(value: Any) -> Optional[int]:
+    if isinstance(value, (int, float)):
+        return normalize_unix_ts(int(value))
+    if isinstance(value, str):
+        s = value.strip()
+        if not s:
+            return None
+        if s.isdigit():
+            return normalize_unix_ts(int(s))
+        try:
+            iso = s.replace("Z", "+00:00")
+            return int(datetime.fromisoformat(iso).timestamp())
+        except ValueError:
+            return None
+    return None
+
+
+def row_timestamp(row: Any) -> Optional[int]:
+    if not isinstance(row, dict):
+        return None
+    for key in ("timestamp", "createdAt", "created_at", "event_time", "resolvedAt"):
+        ts = parse_time_value(row.get(key))
+        if ts is not None:
+            return ts
+    return None
+
+
+def filter_rows_by_ts_window(
+    rows: Any,
+    start_ts: Optional[int],
+    end_ts: Optional[int],
+) -> Any:
+    if not isinstance(rows, list):
+        return rows
+    if start_ts is None and end_ts is None:
+        return rows
+    filtered: List[Any] = []
+    for row in rows:
+        ts = row_timestamp(row)
+        if ts is None:
+            # Some endpoints may not expose a timestamp field on every row.
+            # Keep such rows; otherwise recent mode may drop all data unexpectedly.
+            filtered.append(row)
+            continue
+        if start_ts is not None and ts < start_ts:
+            continue
+        if end_ts is not None and ts > end_ts:
+            continue
+        filtered.append(row)
+    return filtered
 
 
 def write_page_json(out_dir: str, endpoint: str, page_index: int, rows: Any) -> str:
@@ -174,6 +249,8 @@ def paginated_fetch_stream(
     progress: bool,
     out_dir: str,
     resume: bool,
+    window_start_ts: Optional[int] = None,
+    window_end_ts: Optional[int] = None,
 ) -> Dict[str, Any]:
     total_rows = 0
     start_page = next_page_index(out_dir, progress_label) if resume else 0
@@ -196,7 +273,7 @@ def paginated_fetch_stream(
         )
         if isinstance(rows, dict) and rows.get("_error"):
             if progress:
-                print(
+                log(
                     f"[{progress_label}] error_response page={page} url={rows.get('_url')} "
                     "will_retry"
                 )
@@ -205,13 +282,50 @@ def paginated_fetch_stream(
         if not rows:
             break
         if isinstance(rows, list):
+            raw_min_ts, raw_max_ts = extract_min_max_ts(rows)
+            raw_count = len(rows)
+            rows = filter_rows_by_ts_window(rows, window_start_ts, window_end_ts)
+            kept_count = len(rows)
+            if progress and (window_start_ts is not None or window_end_ts is not None):
+                log(
+                    f"[{progress_label}] filter page={page} offset={offset} "
+                    f"raw={raw_count} kept={kept_count} "
+                    f"raw_min_ts={raw_min_ts} raw_max_ts={raw_max_ts}"
+                )
+            if (
+                window_start_ts is not None
+                and raw_min_ts is None
+                and raw_max_ts is None
+                and page == start_page
+            ):
+                if progress:
+                    log(
+                        f"[{progress_label}] no_timestamp_fields_detected "
+                        "recent_mode_fallback=first_page_only"
+                    )
             fingerprint = stable_rows_fingerprint(rows)
             if fingerprint and fingerprint == prev_fingerprint:
                 if progress:
-                    print(
+                    log(
                         f"[{progress_label}] duplicate_page_detected page={page} "
                         f"offset={offset} skipping"
                     )
+                page += 1
+                time.sleep(sleep_s)
+                continue
+            if not rows:
+                # Recent mode guard: if this page is fully older than window, stop scanning.
+                if (
+                    window_start_ts is not None
+                    and raw_max_ts is not None
+                    and raw_max_ts < window_start_ts
+                ):
+                    if progress:
+                        log(
+                            f"[{progress_label}] stop page={page} reason=window_exhausted "
+                            f"raw_max_ts={raw_max_ts} window_start_ts={window_start_ts}"
+                        )
+                    break
                 page += 1
                 time.sleep(sleep_s)
                 continue
@@ -229,16 +343,24 @@ def paginated_fetch_stream(
             prev_fingerprint = fingerprint
             if progress:
                 meta = f"latest_time={latest_time}" if latest_time else "latest_time=NA"
-                print(
+                log(
                     f"[{progress_label}] page={page + 1} offset={offset} "
                     f"count={len(rows)} total={total_rows} {meta}"
                 )
             if limit is not None and len(rows) < limit:
                 break
+            if (
+                window_start_ts is not None
+                and raw_min_ts is None
+                and raw_max_ts is None
+            ):
+                # This endpoint does not expose per-row timestamps. In recent mode,
+                # keep only the first page as a best-effort latest snapshot.
+                break
         else:
             write_page_json(out_dir, progress_label, page, rows)
             if progress:
-                print(f"[{progress_label}] non-list response, total={total_rows}")
+                log(f"[{progress_label}] non-list response, total={total_rows}")
             break
         time.sleep(sleep_s)
         page += 1
@@ -281,7 +403,7 @@ def time_window_fetch_stream(
         page_index_offset = 0
     effective_limit = min(limit, 500) if limit is not None else 500
     if progress:
-        print(
+        log(
             f"[{progress_label}] start_ts={current_start} end_ts={final_end} "
             f"limit={effective_limit}"
         )
@@ -304,14 +426,14 @@ def time_window_fetch_stream(
         )
         if isinstance(rows, dict) and rows.get("_error"):
             if progress:
-                print(
+                log(
                     f"[{progress_label}] error_response url={rows.get('_url')} will_retry"
                 )
             time.sleep(retry_backoff)
             continue
         if not rows:
             if progress and request_index == 0:
-                print(f"[{progress_label}] no rows in window")
+                log(f"[{progress_label}] no rows in window")
             break
         if not isinstance(rows, list):
             if out_dir:
@@ -342,7 +464,7 @@ def time_window_fetch_stream(
         request_index += 1
         latest_ts = last_ts
         if progress:
-            print(
+            log(
                 f"[{progress_label}] page={request_index} rows={total_rows} "
                 f"next_start={current_start}"
             )
@@ -391,12 +513,13 @@ def collect_user_bundle(
     user_dir: str,
     sleep_s: float,
     progress: bool,
+    recent_hours: Optional[int],
 ) -> Dict[str, Any]:
     resume_state_path = os.path.join(user_dir, "resume_state.json")
     resume = os.path.exists(resume_state_path)
     if progress:
         mode = "resume" if resume else "full_history"
-        print(f"[{user}] mode={mode}")
+        log(f"[{user}] mode={mode}")
 
     bundle: Dict[str, Any] = {"user": user, "fetched_at": int(time.time())}
     if not resume:
@@ -408,9 +531,25 @@ def collect_user_bundle(
     closed_limit = ENDPOINT_MAX_LIMITS["closed_positions"]
     activity_limit = ENDPOINT_MAX_LIMITS["activity"]
     endpoints_dir = os.path.join(user_dir, "endpoints")
+    recent_enabled = recent_hours is not None and recent_hours > 0
+    recent_end_ts = int(time.time()) if recent_enabled else None
+    recent_start_ts = (
+        recent_end_ts - int(recent_hours) * 3600
+        if recent_end_ts is not None and recent_hours is not None
+        else None
+    )
+    recent_window_params: Dict[str, Any] = {}
+    if recent_start_ts is not None and recent_end_ts is not None:
+        recent_window_params = {"start": recent_start_ts, "end": recent_end_ts}
+        if progress:
+            log(
+                f"[{user}] recent_window hours={recent_hours} "
+                f"start_ts={recent_start_ts} end_ts={recent_end_ts}"
+            )
+
     positions_stats = paginated_fetch_stream(
         f"{DATA_API}/positions",
-        {"user": user},
+        {"user": user, **recent_window_params},
         positions_limit,
         sleep_s,
         None,
@@ -419,15 +558,17 @@ def collect_user_bundle(
         progress,
         os.path.join(endpoints_dir, "positions"),
         resume,
+        window_start_ts=recent_start_ts,
+        window_end_ts=recent_end_ts,
     )
     if progress:
-        print(
+        log(
             f"[positions] done total={positions_stats['total']} "
             f"pages={positions_stats['page_count']} start_page={positions_stats['start_page']}"
         )
     closed_stats = paginated_fetch_stream(
         f"{DATA_API}/closed-positions",
-        {"user": user},
+        {"user": user, **recent_window_params},
         closed_limit,
         sleep_s,
         None,
@@ -436,9 +577,11 @@ def collect_user_bundle(
         progress,
         os.path.join(endpoints_dir, "closed_positions"),
         resume,
+        window_start_ts=recent_start_ts,
+        window_end_ts=recent_end_ts,
     )
     if progress:
-        print(
+        log(
             f"[closed_positions] done total={closed_stats['total']} "
             f"pages={closed_stats['page_count']} start_page={closed_stats['start_page']}"
         )
@@ -453,21 +596,24 @@ def collect_user_bundle(
         int(resume_state.get("trade_last_ts", 0)) if isinstance(resume_state, dict) else 0
     )
 
-    if resume_activity_ts > 0:
+    if recent_enabled and recent_start_ts is not None:
+        activity_start_ts = recent_start_ts
+    elif resume_activity_ts > 0:
         activity_start_ts = resume_activity_ts
     else:
         activity_start_ts = 0
     if progress:
-        print(
+        log(
             f"[activity] resume_ts={resume_activity_ts} "
             f"resume={resume}"
         )
     activity_stats = time_window_fetch_stream(
         f"{DATA_API}/activity",
-        {"user": user},
+        {"user": user, **recent_window_params},
         activity_limit,
         sleep_s,
         start_ts=activity_start_ts,
+        end_ts=recent_end_ts,
         retries=None,
         retry_backoff=1.5,
         progress_label="activity",
@@ -476,27 +622,30 @@ def collect_user_bundle(
         resume=resume,
     )
     if progress:
-        print(
+        log(
             f"[activity] done total={activity_stats['total']} "
             f"pages={activity_stats['page_count']} start_ts={activity_stats['start_ts']} "
             f"end_ts={activity_stats['end_ts']} min_ts={activity_stats['min_ts']} "
             f"max_ts={activity_stats['max_ts']}"
         )
-    if resume_trade_ts > 0:
+    if recent_enabled and recent_start_ts is not None:
+        trade_start_ts = recent_start_ts
+    elif resume_trade_ts > 0:
         trade_start_ts = resume_trade_ts
     else:
         trade_start_ts = 0
     if progress:
-        print(
+        log(
             f"[trades] resume_ts={resume_trade_ts} "
             f"resume={resume}"
         )
     trades_stats = time_window_fetch_stream(
         f"{DATA_API}/activity",
-        {"user": user, "type": "TRADE"},
+        {"user": user, "type": "TRADE", **recent_window_params},
         activity_limit,
         sleep_s,
         start_ts=trade_start_ts,
+        end_ts=recent_end_ts,
         retries=None,
         retry_backoff=1.5,
         progress_label="trades",
@@ -505,7 +654,7 @@ def collect_user_bundle(
         resume=resume,
     )
     if progress:
-        print(
+        log(
             f"[trades] done total={trades_stats['total']} "
             f"pages={trades_stats['page_count']} start_ts={trades_stats['start_ts']} "
             f"end_ts={trades_stats['end_ts']} min_ts={trades_stats['min_ts']} "
@@ -515,21 +664,21 @@ def collect_user_bundle(
 
     traded_markets = safe_get_json(
         f"{DATA_API}/traded",
-        {"user": user},
+        {"user": user, **recent_window_params},
         retries=None,
         retry_backoff=1.5,
     )
     positions_value = safe_get_json(
         f"{DATA_API}/value",
-        {"user": user},
+        {"user": user, **recent_window_params},
         retries=None,
         retry_backoff=1.5,
     )
     write_json(os.path.join(endpoints_dir, "traded_markets.json"), traded_markets)
     write_json(os.path.join(endpoints_dir, "positions_value.json"), positions_value)
     if progress:
-        print("[traded_markets] done")
-        print("[positions_value] done")
+        log("[traded_markets] done")
+        log("[positions_value] done")
 
     bundle["endpoints"] = {
         "positions": positions_stats,
@@ -545,6 +694,13 @@ def collect_user_bundle(
             "file": "positions_value.json",
         },
     }
+    if recent_start_ts is not None and recent_end_ts is not None:
+        bundle["recent_window"] = {
+            "enabled": True,
+            "hours": recent_hours,
+            "start_ts": recent_start_ts,
+            "end_ts": recent_end_ts,
+        }
     return bundle
 
 
@@ -566,6 +722,7 @@ def main() -> None:
             user_dir=user_dir,
             sleep_s=args.sleep,
             progress=not args.no_progress,
+            recent_hours=args.recent,
         )
 
         out_path = write_bundle(user_dir, bundle)
@@ -587,8 +744,8 @@ def main() -> None:
         }
         manifest_path = os.path.join(user_dir, "manifest.json")
         write_json(manifest_path, manifest)
-        print(f"Wrote {out_path}")
-        print(f"Wrote {manifest_path}")
+        log(f"Wrote {out_path}")
+        log(f"Wrote {manifest_path}")
 
 
 if __name__ == "__main__":

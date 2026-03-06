@@ -20,7 +20,7 @@ from flask import Flask, jsonify, render_template, request
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Local web dashboard for Polymarket data")
     parser.add_argument("--data-dir", default="data/polymarket", help="Data root directory")
-    parser.add_argument("--host", default="127.0.0.1", help="Host to bind")
+    parser.add_argument("--host", default="0.0.0.0", help="Host to bind")
     parser.add_argument("--port", type=int, default=8000, help="Port to bind")
     parser.add_argument("--debug", action="store_true", help="Enable Flask debug")
     return parser.parse_args()

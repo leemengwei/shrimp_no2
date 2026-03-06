@@ -94,7 +94,7 @@ function updateEndpointSummary(meta) {
   }
   const total = meta.total;
   endpointTotal.textContent = total === null || total === undefined ? "-" : total.toString();
-  if (meta.min_ts || meta.max_ts) {
+  if (meta.min_ts && meta.max_ts) {
     endpointRange.textContent = `${formatTs(meta.min_ts)} ~ ${formatTs(meta.max_ts)}`;
   } else if (meta.min_ts || meta.max_ts) {
     endpointRange.textContent = formatTs(meta.min_ts || meta.max_ts);
