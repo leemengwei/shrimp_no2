@@ -488,13 +488,37 @@ async function loadRecords() {
       ? data.columns
       : Object.keys((state.lastRows[0] || {}));
   state.lastColumns = baseColumns;
+  let columnsUpdated = false;
   if (state.visibleColumns.size === 0 || state.forceAllColumns) {
     state.visibleColumns = new Set(state.lastColumns);
     state.forceAllColumns = false;
+    columnsUpdated = true;
+  } else {
+    for (const col of state.lastColumns) {
+      if (col.startsWith("shares_")) {
+        if (!state.visibleColumns.has(col)) {
+          state.visibleColumns.add(col);
+          columnsUpdated = true;
+        }
+      }
+    }
   }
   state.lastColumnsKey = state.lastColumns.join("|");
   if (state.columnOrder.length === 0) {
     state.columnOrder = orderColumns(state.lastColumns);
+    columnsUpdated = true;
+  } else {
+    const existing = new Set(state.columnOrder);
+    for (const col of state.lastColumns) {
+      if (!existing.has(col)) {
+        state.columnOrder.push(col);
+        existing.add(col);
+        columnsUpdated = true;
+      }
+    }
+  }
+  if (columnsUpdated) {
+    persistColumnState();
   }
   buildTable(state.lastRows, state.lastColumns);
   if (columnGrid.dataset.columnsKey !== state.lastColumnsKey) {

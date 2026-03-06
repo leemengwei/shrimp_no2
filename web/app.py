@@ -278,6 +278,168 @@ def apply_compact_view(endpoint: str, rows: List[Dict[str, Any]]) -> Tuple[List[
     return trimmed, columns
 
 
+def _to_float(val: Any) -> Optional[float]:
+    if isinstance(val, (int, float)):
+        return float(val)
+    if isinstance(val, str):
+        try:
+            return float(val)
+        except ValueError:
+            return None
+    return None
+
+
+def _normalize_outcome_index(raw: Any) -> Optional[int]:
+    if isinstance(raw, int):
+        return raw
+    if isinstance(raw, str) and raw.isdigit():
+        return int(raw)
+    return None
+
+
+def _collect_activity_outcomes(rows: List[Dict[str, Any]]) -> Dict[str, List[Dict[str, Any]]]:
+    by_condition: Dict[str, Dict[str, Dict[str, Any]]] = {}
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        condition_id = str(row.get("conditionId") or "").strip()
+        if not condition_id:
+            continue
+        outcome = str(row.get("outcome") or "").strip()
+        outcome_index = _normalize_outcome_index(row.get("outcomeIndex"))
+        if outcome_index is not None and outcome_index == 999:
+            outcome_index = None
+
+        key = None
+        if outcome_index is not None:
+            key = f"idx:{outcome_index}"
+        elif outcome:
+            key = f"name:{outcome}"
+        if not key:
+            continue
+
+        entry = by_condition.setdefault(condition_id, {})
+        if key not in entry:
+            entry[key] = {
+                "outcome": outcome,
+                "outcomeIndex": outcome_index,
+            }
+        else:
+            if not entry[key].get("outcome") and outcome:
+                entry[key]["outcome"] = outcome
+            if entry[key].get("outcomeIndex") is None and outcome_index is not None:
+                entry[key]["outcomeIndex"] = outcome_index
+
+    normalized: Dict[str, List[Dict[str, Any]]] = {}
+    for condition_id, outcomes in by_condition.items():
+        items = list(outcomes.values())
+
+        def _sort_key(item: Dict[str, Any]) -> Tuple[int, int, str]:
+            idx = item.get("outcomeIndex")
+            idx_val = idx if isinstance(idx, int) else 999999
+            return (0 if isinstance(idx, int) else 1, idx_val, str(item.get("outcome") or ""))
+
+        items.sort(key=_sort_key)
+        normalized[condition_id] = items
+    return normalized
+
+
+def apply_activity_shares_summary(rows: List[Dict[str, Any]]) -> None:
+    outcomes = _collect_activity_outcomes(rows)
+    rows_sorted = sorted(
+        (row for row in rows if isinstance(row, dict)),
+        key=lambda r: extract_ts(r) if extract_ts(r) is not None else -1,
+    )
+    cumulative: Dict[Tuple[str, str], float] = {}
+
+    for row in rows_sorted:
+        row["shares_summary"] = ""
+        action_type = str(row.get("type") or "").upper()
+        condition_id = str(row.get("conditionId") or "").strip()
+        if not condition_id:
+            continue
+        size = _to_float(row.get("size"))
+        if size is None:
+            continue
+
+        if action_type not in {"TRADE", "SPLIT", "MERGE", "REDEEM"}:
+            continue
+
+        pieces: List[str] = []
+
+        def _label_for(outcome_label: str, outcome_index: Optional[int]) -> str:
+            if outcome_label:
+                return outcome_label
+            if outcome_index is not None:
+                return f"#{outcome_index}"
+            return "ALL"
+
+        def _outcome_key(outcome_label: str, outcome_index: Optional[int]) -> str:
+            if isinstance(outcome_index, int):
+                return f"idx:{outcome_index}"
+            if outcome_label:
+                return f"name:{outcome_label}"
+            return "all:unknown"
+
+        if action_type == "TRADE":
+            side = str(row.get("side") or "").upper()
+            delta = size if side == "BUY" else -size if side == "SELL" else 0.0
+            if delta == 0:
+                continue
+            outcome_index = _normalize_outcome_index(row.get("outcomeIndex"))
+            if outcome_index == 999:
+                outcome_index = None
+            outcome_label = str(row.get("outcome") or "").strip()
+            outcome_key = _outcome_key(outcome_label, outcome_index)
+            cum_key = (condition_id, outcome_key)
+            cumulative[cum_key] = cumulative.get(cum_key, 0.0) + delta
+            label = _label_for(outcome_label, outcome_index)
+            pieces.append(f"{label}:{delta:+g} ({cumulative[cum_key]:g})")
+
+        elif action_type == "REDEEM":
+            known_outcomes = outcomes.get(condition_id, [])
+            if not known_outcomes:
+                pieces.append("REDEEM:unknown")
+            else:
+                for outcome_info in known_outcomes:
+                    outcome_label = str(outcome_info.get("outcome") or "").strip()
+                    outcome_index = outcome_info.get("outcomeIndex")
+                    outcome_key = _outcome_key(outcome_label, outcome_index)
+                    cum_key = (condition_id, outcome_key)
+                    current = cumulative.get(cum_key, 0.0)
+                    if current == 0:
+                        continue
+                    delta = -current
+                    cumulative[cum_key] = 0.0
+                    label = _label_for(outcome_label, outcome_index)
+                    pieces.append(f"{label}:{delta:+g} (0)")
+
+        else:
+            delta = size if action_type == "SPLIT" else -size
+            known_outcomes = outcomes.get(condition_id, [])
+            if not known_outcomes:
+                outcome_label = "ALL"
+                outcome_index = None
+                outcome_key = _outcome_key(outcome_label, outcome_index)
+                cum_key = (condition_id, outcome_key)
+                cumulative[cum_key] = cumulative.get(cum_key, 0.0) + delta
+                pieces.append(f"{outcome_label}:{delta:+g} ({cumulative[cum_key]:g})")
+            else:
+                for outcome_info in known_outcomes:
+                    outcome_label = str(outcome_info.get("outcome") or "").strip()
+                    outcome_index = outcome_info.get("outcomeIndex")
+                    outcome_key = _outcome_key(outcome_label, outcome_index)
+                    cum_key = (condition_id, outcome_key)
+                    cumulative[cum_key] = cumulative.get(cum_key, 0.0) + delta
+                    label = _label_for(outcome_label, outcome_index)
+                    pieces.append(f"{label}:{delta:+g} ({cumulative[cum_key]:g})")
+
+        if not pieces:
+            continue
+
+        row["shares_summary"] = ", ".join(pieces)
+
+
 def summarize_rows(rows: Iterable[Dict[str, Any]]) -> Dict[str, Any]:
     total = 0
     min_ts: Optional[int] = None
@@ -474,6 +636,10 @@ def api_records(user: str) -> Any:
             column_filters = None
 
     filtered, all_columns = filter_rows(rows_iter, query, from_ts_i, to_ts_i, column_filters)
+
+    if endpoint == "activity":
+        apply_activity_shares_summary(filtered)
+        all_columns = sorted(set().union(*[row.keys() for row in filtered])) if filtered else []
 
     if sort_order in ("asc", "desc"):
         filtered.sort(
