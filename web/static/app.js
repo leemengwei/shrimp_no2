@@ -161,26 +161,6 @@ function sortRows(rows) {
   });
 }
 
-function addActivityCumulative(rows) {
-  const ordered = [...rows].sort((a, b) => {
-    const at = a.timestamp || a.createdAt || a.time || 0;
-    const bt = b.timestamp || b.createdAt || b.time || 0;
-    return at - bt;
-  });
-  const cumBySide = new Map();
-  const sides = new Set();
-  ordered.forEach((row) => {
-    const val = row.usdcSize ?? row.usdc_size ?? 0;
-    const num = typeof val === "number" ? val : parseFloat(val) || 0;
-    const side = (row.side || "UNKNOWN").toString().toUpperCase();
-    sides.add(side);
-    const prev = cumBySide.get(side) || 0;
-    const next = prev + num;
-    cumBySide.set(side, next);
-    row[`cum_usdc_${side.toLowerCase()}`] = next;
-  });
-  return Array.from(sides);
-}
 
 function orderColumns(columns) {
   const preferred = [
@@ -211,7 +191,6 @@ function orderColumns(columns) {
     "percentPnl",
     "realizedPnl",
     "percentRealizedPnl",
-    "cum_usdc",
     "resolvedAt",
   ];
   const seen = new Set();
@@ -503,40 +482,15 @@ async function loadRecords() {
   const data = await fetchJson(`/api/user/${state.user}/records?${params.toString()}`);
   state.total = data.total || 0;
   state.lastRows = data.rows || [];
-  if (state.endpoint === "activity") {
-    state.lastRows = state.lastRows.filter(
-      (row) => (row.type || "").toString().toUpperCase() !== "YIELD"
-    );
-  }
-  if (state.endpoint === "activity") {
-    const sides = addActivityCumulative(state.lastRows);
-    const sideCols = sides.map((s) => `cum_usdc_${s.toLowerCase()}`);
-    if (sideCols.length > 0) {
-      if (data.all_columns && data.all_columns.length > 0) {
-        data.all_columns = data.all_columns.concat(sideCols);
-      }
-    }
-  }
   const baseColumns = (data.all_columns && data.all_columns.length > 0)
     ? data.all_columns
     : (data.columns && data.columns.length > 0)
       ? data.columns
       : Object.keys((state.lastRows[0] || {}));
   state.lastColumns = baseColumns;
-  if (state.endpoint === "activity") {
-    const cumCols = state.lastColumns.filter((c) => c.startsWith("cum_usdc_"));
-    if (cumCols.length === 0) {
-      const derived = Object.keys((state.lastRows[0] || {})).filter((c) => c.startsWith("cum_usdc_"));
-      state.lastColumns = state.lastColumns.concat(derived);
-    }
-  }
   if (state.visibleColumns.size === 0 || state.forceAllColumns) {
     state.visibleColumns = new Set(state.lastColumns);
     state.forceAllColumns = false;
-  } else if (state.endpoint === "activity") {
-    state.lastColumns.forEach((col) => {
-      if (col.startsWith("cum_usdc_")) state.visibleColumns.add(col);
-    });
   }
   state.lastColumnsKey = state.lastColumns.join("|");
   if (state.columnOrder.length === 0) {
@@ -624,6 +578,7 @@ endpointSelect.addEventListener("change", async (e) => {
   await loadConfigs();
   await loadRecords();
 });
+
 
 showAllBtn.addEventListener("click", async () => {
   state.visibleColumns = new Set(state.lastColumns);

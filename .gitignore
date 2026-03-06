@@ -5,3 +5,4 @@ field_ops/clob_snapshot.json
 __pycache__/
 *.jsonl
 user_info
+data/

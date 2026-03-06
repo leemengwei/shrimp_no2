@@ -457,6 +457,13 @@ def api_records(user: str) -> Any:
         return jsonify({"rows": [], "total": 0, "endpoint": endpoint})
 
     rows_iter = read_endpoint_pages(files)
+    if endpoint == "activity":
+        def _filter_yield(rows: Iterable[Any]) -> Iterable[Any]:
+            for row in rows:
+                if isinstance(row, dict) and str(row.get("type", "")).upper() == "YIELD":
+                    continue
+                yield row
+        rows_iter = _filter_yield(rows_iter)
     column_filters = None
     if filters_raw:
         try:
