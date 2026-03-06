@@ -504,6 +504,11 @@ async function loadRecords() {
   state.total = data.total || 0;
   state.lastRows = data.rows || [];
   if (state.endpoint === "activity") {
+    state.lastRows = state.lastRows.filter(
+      (row) => (row.type || "").toString().toUpperCase() !== "YIELD"
+    );
+  }
+  if (state.endpoint === "activity") {
     const sides = addActivityCumulative(state.lastRows);
     const sideCols = sides.map((s) => `cum_usdc_${s.toLowerCase()}`);
     if (sideCols.length > 0) {
