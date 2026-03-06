@@ -1,0 +1,136 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>小虾米 数据面板</title>
+  <link rel="stylesheet" href="/static/style.css" />
+</head>
+<body>
+  <div class="page">
+    <header class="header">
+      <div>
+        <h1>小虾米 数据面板</h1>
+        <p class="subtitle">本地数据展示与筛选</p>
+      </div>
+      <div class="user-controls">
+        <label>
+          用户
+          <select id="userSelect"></select>
+        </label>
+        <label>
+          端点
+          <select id="endpointSelect"></select>
+        </label>
+      </div>
+    </header>
+
+    <section class="filters">
+      <label>
+        搜索关键词
+        <input id="queryInput" type="text" placeholder="标题、市场、地址、方向等" />
+      </label>
+      <label>
+        起始时间戳
+        <input id="fromTsInput" type="number" placeholder="例如 1700000000" />
+      </label>
+      <label>
+        结束时间戳
+        <input id="toTsInput" type="number" placeholder="例如 1710000000" />
+      </label>
+      <button id="applyBtn">应用筛选</button>
+      <button id="resetBtn" class="ghost">重置</button>
+      <label>
+        排序
+        <select id="sortSelect">
+          <option value="desc" selected>时间倒序</option>
+          <option value="asc">时间正序</option>
+        </select>
+      </label>
+    </section>
+
+    <section class="summary" id="summaryBox">
+      <div class="summary-item">
+        <div class="label">筛选后记录数</div>
+        <div class="value" id="totalCount">-</div>
+      </div>
+      <div class="summary-item">
+        <div class="label">当前页</div>
+        <div class="value" id="pageInfo">-</div>
+      </div>
+      <div class="summary-item">
+        <div class="label">端点总记录</div>
+        <div class="value" id="endpointTotal">-</div>
+      </div>
+      <div class="summary-item">
+        <div class="label">端点时间范围</div>
+        <div class="value" id="endpointRange">-</div>
+      </div>
+      <div class="summary-item">
+        <div class="label">持仓市值</div>
+        <div class="value" id="positionsValue">-</div>
+      </div>
+      <div class="summary-item">
+        <div class="label">交易市场数</div>
+        <div class="value" id="tradedMarkets">-</div>
+      </div>
+      <div class="summary-item">
+        <div class="label">生成时间</div>
+        <div class="value" id="generatedAt">-</div>
+      </div>
+      <div class="summary-item">
+        <div class="label">抓取时间</div>
+        <div class="value" id="fetchedAt">-</div>
+      </div>
+    </section>
+
+    <section class="table-section">
+      <div class="column-panel" id="columnPanel">
+        <div class="column-title">列设置与筛选</div>
+        <div class="column-actions">
+          <button id="showAllBtn" class="ghost">全选列</button>
+          <button id="hideAllBtn" class="ghost">清空列</button>
+          <button id="clearFiltersBtn" class="ghost">清空列筛选</button>
+          <button id="saveConfigBtn" class="ghost">保存配置</button>
+          <label class="config-label">
+            配置
+            <select id="configSelect"></select>
+          </label>
+          <button id="saveAsBtn" class="ghost">另存为</button>
+          <button id="deleteConfigBtn" class="ghost">删除配置</button>
+          <span class="saved-hint" id="savedHint">未保存</span>
+        </div>
+        <div class="column-grid" id="columnGrid"></div>
+      </div>
+      <div class="table-actions">
+        <div class="pager">
+          <button id="prevBtn" class="ghost">上一页</button>
+          <button id="nextBtn" class="ghost">下一页</button>
+        </div>
+        <label>
+          每页
+          <select id="limitSelect">
+            <option value="20">20</option>
+            <option value="50">50</option>
+            <option value="100">100</option>
+            <option value="200">200</option>
+            <option value="500" selected>500</option>
+            <option value="1000">1000</option>
+            <option value="2000">2000</option>
+          </select>
+        </label>
+      </div>
+      <div class="table-wrap">
+        <table id="dataTable">
+          <thead>
+            <tr id="tableHead"></tr>
+          </thead>
+          <tbody id="tableBody"></tbody>
+        </table>
+      </div>
+    </section>
+  </div>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>
