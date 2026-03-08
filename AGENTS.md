@@ -9,6 +9,7 @@
 ## Build, Test, and Development Commands
 - No build system or runtime entrypoint is defined yet.
 - When adding tooling, document the exact commands here (e.g., `python -m pytest`, `make lint`).
+- Real-time sports price streaming: `python3 src/stream_sports_prices.py --output data/realtime/sports_ticks.jsonl --snapshot-output data/realtime/sports_latest_snapshot.json --batch-size 350 --max-connections 10`
 
 ## Coding Style & Naming Conventions
 - Prefer Python for data analysis and prototyping, as suggested in `ResearchDescription.md`.
