@@ -20,3 +20,7 @@
 ## 备注
 - 后续将优先使用官方文档/榜单/公开API，不使用非官方数据源。
 - 如果发现新的官方端点或更适合的入口，会在此追加更新。
+
+## 补充：体育市场历史价格（公开）
+- Gamma 市场列表：https://gamma-api.polymarket.com/markets
+- CLOB 历史价格：https://clob.polymarket.com/prices-history
