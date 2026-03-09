@@ -93,25 +93,6 @@ def _http_json(url: str, params: Optional[Dict[str, Any]] = None) -> Any:
         return json.loads(resp.read().decode("utf-8"))
 
 
-def is_sports_market(market: Dict[str, Any], sports_tag: str) -> bool:
-    needle = sports_tag.lower().strip()
-    category = str(market.get("category") or "").lower()
-    if needle and needle in category:
-        return True
-
-    tags = market.get("tags")
-    if isinstance(tags, list):
-        for tag in tags:
-            if isinstance(tag, str) and needle in tag.lower():
-                return True
-            if isinstance(tag, dict):
-                label = str(tag.get("label") or tag.get("name") or "").lower()
-                slug = str(tag.get("slug") or "").lower()
-                if needle in label or needle in slug:
-                    return True
-    return False
-
-
 def _fetch_markets_page(params: Dict[str, Any]) -> List[Dict[str, Any]]:
     payload = _http_json(f"{GAMMA_API}/markets", params)
     if not isinstance(payload, list):
@@ -119,57 +100,62 @@ def _fetch_markets_page(params: Dict[str, Any]) -> List[Dict[str, Any]]:
     return [row for row in payload if isinstance(row, dict)]
 
 
+def _fetch_sports_tag_ids(sports_tag: str) -> List[int]:
+    payload = _http_json(f"{GAMMA_API}/sports")
+    if not isinstance(payload, list):
+        return []
+    needle = sports_tag.strip().lower()
+    out: List[int] = []
+    for row in payload:
+        if not isinstance(row, dict):
+            continue
+        row_id = row.get("id")
+        if not isinstance(row_id, int):
+            continue
+        name = str(row.get("name") or row.get("label") or row.get("slug") or "").lower()
+        if not needle or needle in name:
+            out.append(row_id)
+    return out
+
+
 def fetch_sports_markets(sports_tag: str, limit_markets: int) -> List[Dict[str, Any]]:
     rows: List[Dict[str, Any]] = []
-    offset = 0
     page_limit = 500
 
-    while True:
-        payload = _fetch_markets_page(
-            {
-                "active": "true",
-                "closed": "false",
-                "archived": "false",
-                "tag": sports_tag,
-                "limit": page_limit,
-                "offset": offset,
-            }
-        )
-        if not payload:
-            break
-        rows.extend(payload)
-        if 0 < limit_markets <= len(rows):
-            return rows[:limit_markets]
-        if len(payload) < page_limit:
-            break
-        offset += page_limit
+    tag_ids = _fetch_sports_tag_ids(sports_tag)
+    if not tag_ids:
+        raise RuntimeError(f"No sports tag ids found from /sports for sports-tag='{sports_tag}'.")
 
-    # Fallback: Some deployments may not support tag filter.
-    if rows:
-        return rows[:limit_markets] if limit_markets > 0 else rows
-
-    offset = 0
-    while True:
-        payload = _fetch_markets_page(
-            {
-                "active": "true",
-                "closed": "false",
-                "archived": "false",
-                "limit": page_limit,
-                "offset": offset,
-            }
-        )
-        if not payload:
-            break
-        for row in payload:
-            if is_sports_market(row, sports_tag):
-                rows.append(row)
-                if 0 < limit_markets <= len(rows):
-                    return rows
-        if len(payload) < page_limit:
-            break
-        offset += page_limit
-    return rows
+    for tag_id in tag_ids:
+        offset = 0
+        while True:
+            payload = _fetch_markets_page(
+                {
+                    "active": "true",
+                    "closed": "false",
+                    "archived": "false",
+                    "tag_id": tag_id,
+                    "limit": page_limit,
+                    "offset": offset,
+                }
+            )
+            if not payload:
+                break
+            rows.extend(payload)
+            if 0 < limit_markets <= len(rows):
+                return rows[:limit_markets]
+            if len(payload) < page_limit:
+                break
+            offset += page_limit
+    deduped: List[Dict[str, Any]] = []
+    seen: Set[str] = set()
+    for row in rows:
+        key = str(row.get("id") or "")
+        if key and key in seen:
+            continue
+        seen.add(key)
+        deduped.append(row)
+    return deduped[:limit_markets] if limit_markets > 0 else deduped
 
 
 def _coerce_token_ids(market: Dict[str, Any]) -> List[str]:
@@ -246,13 +232,19 @@ def maybe_collect_events(message: Any, connection_id: int) -> List[Dict[str, Any
         return events
 
     if isinstance(message, dict):
-        data = message.get("data")
-        if isinstance(data, list):
-            for item in data:
-                if isinstance(item, dict):
-                    events.append(normalize_event(item, connection_id))
+        if message.get("event_type") == "price_change":
+            market = message.get("market")
+            source_ts = message.get("timestamp") or message.get("ts")
+            for item in message.get("price_changes", []) if isinstance(message.get("price_changes"), list) else []:
+                if not isinstance(item, dict):
+                    continue
+                row = dict(item)
+                row.setdefault("event_type", "price_change")
+                row.setdefault("market", market)
+                row.setdefault("timestamp", source_ts)
+                events.append(normalize_event(row, connection_id))
             return events
-        if any(k in message for k in ("asset_id", "asset", "token_id", "price", "best_bid", "best_ask")):
+        if "asset_id" in message and "event_type" in message:
             events.append(normalize_event(message, connection_id))
     return events
 
@@ -269,10 +261,7 @@ async def stream_batch(
     import websockets
 
     subscribe_payload = {
-        "type": "subscribe",
-        "channel": "market",
-        # Keep both spellings for compatibility with possible server variants.
-        "asset_ids": asset_ids,
+        "type": "market",
         "assets_ids": asset_ids,
     }
 

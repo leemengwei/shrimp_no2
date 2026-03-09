@@ -26,34 +26,6 @@ GAMMA_API = "https://gamma-api.polymarket.com"
 CLOB_API = "https://clob.polymarket.com"
 USER_AGENT = "polymarket-research/1.0"
 
-# Broader keyword set to avoid dropping sports markets whose tags do not contain "sport".
-SPORTS_KEYWORDS = {
-    "sport",
-    "soccer",
-    "football",
-    "nfl",
-    "ncaa",
-    "basketball",
-    "nba",
-    "wnba",
-    "baseball",
-    "mlb",
-    "hockey",
-    "nhl",
-    "golf",
-    "tennis",
-    "cricket",
-    "mma",
-    "ufc",
-    "boxing",
-    "f1",
-    "formula 1",
-    "motogp",
-    "esports",
-    "olympics",
-}
-
-
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
@@ -169,38 +141,15 @@ def parse_clob_token_ids(market: Dict[str, Any]) -> List[str]:
     return deduped
 
 
-def market_text_signals(market: Dict[str, Any]) -> List[str]:
-    out: List[str] = []
-
-    for key in ("category", "sportsMarketType", "question", "title", "slug"):
-        value = market.get(key)
-        if isinstance(value, str):
-            out.append(value.lower())
-
-    tags = market.get("tags")
-    if isinstance(tags, list):
-        for item in tags:
-            if isinstance(item, dict):
-                for key in ("slug", "label", "name"):
-                    val = item.get(key)
-                    if isinstance(val, str):
-                        out.append(val.lower())
-            elif isinstance(item, str):
-                out.append(item.lower())
-
-    event = market.get("event")
-    if isinstance(event, dict):
-        for key in ("category", "slug", "title"):
-            val = event.get(key)
-            if isinstance(val, str):
-                out.append(val.lower())
-
+def fetch_sports_tag_ids(retries: int) -> List[int]:
+    payload = http_get_json(f"{GAMMA_API}/sports", params={}, retries=retries)
+    if not isinstance(payload, list):
+        return []
+    out: List[int] = []
+    for row in payload:
+        if isinstance(row, dict) and isinstance(row.get("id"), int):
+            out.append(row["id"])
     return out
-
-
-def market_is_sports(market: Dict[str, Any]) -> bool:
-    signals = " | ".join(market_text_signals(market))
-    return any(keyword in signals for keyword in SPORTS_KEYWORDS)
 
 
 def fetch_market_mode(mode_params: Dict[str, Any], retries: int, sleep_s: float) -> List[Dict[str, Any]]:
@@ -224,7 +173,11 @@ def fetch_market_mode(mode_params: Dict[str, Any], retries: int, sleep_s: float)
 
 
 def fetch_all_markets(only_active: bool, retries: int, sleep_s: float) -> List[Dict[str, Any]]:
-    # Use multiple modes + dedupe by market id to avoid accidental blind spots.
+    merged: Dict[str, Dict[str, Any]] = {}
+    sports_tag_ids = fetch_sports_tag_ids(retries=retries)
+    if not sports_tag_ids:
+        raise RuntimeError("No sports tag ids found from /sports.")
+
     modes: List[Dict[str, Any]]
     if only_active:
         modes = [{"active": "true"}]
@@ -233,16 +186,20 @@ def fetch_all_markets(only_active: bool, retries: int, sleep_s: float) -> List[D
             {"active": "true"},
             {"closed": "true"},
             {"archived": "true"},
-            {},
         ]
-
-    merged: Dict[str, Dict[str, Any]] = {}
-    for mode in modes:
-        page_items = fetch_market_mode(mode_params=mode, retries=retries, sleep_s=sleep_s)
-        for item in page_items:
-            market_id = item.get("id")
-            key = str(market_id) if market_id is not None else str(hash(json.dumps(item, sort_keys=True)))
-            merged[key] = item
+    for tag_id in sports_tag_ids:
+        for mode in modes:
+            params = dict(mode)
+            params["tag_id"] = tag_id
+            page_items = fetch_market_mode(mode_params=params, retries=retries, sleep_s=sleep_s)
+            for item in page_items:
+                market_id = item.get("id")
+                key = (
+                    str(market_id)
+                    if market_id is not None
+                    else str(hash(json.dumps(item, sort_keys=True)))
+                )
+                merged[key] = item
 
     return sorted(
         merged.values(),
@@ -254,7 +211,7 @@ def parse_prices_response(payload: Any) -> List[Dict[str, Any]]:
     if isinstance(payload, list):
         return [row for row in payload if isinstance(row, dict)]
     if isinstance(payload, dict):
-        rows = payload.get("history") or payload.get("data") or payload.get("prices")
+        rows = payload.get("history")
         if isinstance(rows, list):
             return [row for row in rows if isinstance(row, dict)]
     return []
@@ -384,7 +341,7 @@ def main() -> None:
         retries=args.retries,
         sleep_s=args.sleep,
     )
-    sports_markets = [m for m in all_markets if market_is_sports(m)]
+    sports_markets = all_markets
     if args.market_limit is not None:
         sports_markets = sports_markets[: args.market_limit]
 
@@ -415,7 +372,6 @@ def main() -> None:
             "slug": market_slug,
             "question": market_title,
             "token_ids": token_ids,
-            "sports_signals": market_text_signals(market),
             "tokens": [],
         }
 
