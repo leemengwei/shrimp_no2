@@ -44,6 +44,26 @@ h1 {
   color: var(--muted);
 }
 
+.nav-links {
+  display: flex;
+  gap: 10px;
+  margin-top: 8px;
+}
+
+.nav-link {
+  color: var(--muted);
+  text-decoration: none;
+  border: 1px solid var(--border);
+  padding: 4px 8px;
+  border-radius: 6px;
+  font-size: 11px;
+}
+
+.nav-link.active {
+  color: var(--text);
+  border-color: var(--accent);
+}
+
 .user-controls {
   display: flex;
   gap: 12px;
@@ -132,6 +152,32 @@ button.ghost {
   border-radius: 10px;
   border: 1px solid var(--border);
   padding: 12px;
+}
+
+.chart-section {
+  margin-bottom: 16px;
+}
+
+.chart-card {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 12px;
+}
+
+.chart-title {
+  color: var(--muted);
+  font-size: 12px;
+  margin-bottom: 8px;
+}
+
+.raw-cell {
+  max-width: 420px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  color: var(--muted);
+  font-size: 11px;
 }
 
 .column-panel {

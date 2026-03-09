@@ -10,7 +10,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
@@ -20,6 +20,11 @@ from flask import Flask, jsonify, render_template, request
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Local web dashboard for Polymarket data")
     parser.add_argument("--data-dir", default="data/polymarket", help="Data root directory")
+    parser.add_argument(
+        "--sports-dir",
+        default="data/polymarket/sports_history",
+        help="Sports history output directory (from collect_sports_history.py)",
+    )
     parser.add_argument("--host", default="0.0.0.0", help="Host to bind")
     parser.add_argument("--port", type=int, default=8000, help="Port to bind")
     parser.add_argument("--debug", action="store_true", help="Enable Flask debug")
@@ -149,6 +154,28 @@ def extract_ts(row: Dict[str, Any]) -> Optional[int]:
         if isinstance(val, str) and val.isdigit():
             return int(val)
     return None
+
+
+def parse_ts_param(raw: Optional[str]) -> Optional[int]:
+    if not raw:
+        return None
+    text = raw.strip()
+    if not text:
+        return None
+    if text.isdigit():
+        return int(text)
+    if text.endswith("Z"):
+        text = text[:-1] + "+00:00"
+    try:
+        dt = datetime.fromisoformat(text)
+    except ValueError:
+        try:
+            dt = datetime.strptime(text, "%Y-%m-%d")
+        except ValueError:
+            return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return int(dt.timestamp())
 
 
 def row_matches(row: Dict[str, Any], query: str) -> bool:
@@ -458,6 +485,88 @@ def summarize_rows(rows: Iterable[Dict[str, Any]]) -> Dict[str, Any]:
     return {"total": total, "min_ts": min_ts, "max_ts": max_ts}
 
 
+def load_sports_manifest(sports_dir: Path) -> Dict[str, Any]:
+    path = sports_dir / "manifest.json"
+    if path.exists():
+        return load_json(path)
+    return {}
+
+
+def iter_jsonl(path: Path) -> Iterable[Any]:
+    if not path.exists():
+        return
+    with path.open("r", encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                yield json.loads(line)
+            except json.JSONDecodeError:
+                continue
+
+
+def summarize_tokens(tokens: List[Dict[str, Any]]) -> Dict[str, Any]:
+    min_ts = None
+    max_ts = None
+    points = 0
+    unique_points = 0
+    for token in tokens:
+        if not isinstance(token, dict):
+            continue
+        points += int(token.get("points") or 0)
+        unique_points += int(token.get("unique_points") or 0)
+        t_min = token.get("min_ts")
+        t_max = token.get("max_ts")
+        if isinstance(t_min, int):
+            min_ts = t_min if min_ts is None else min(min_ts, t_min)
+        if isinstance(t_max, int):
+            max_ts = t_max if max_ts is None else max(max_ts, t_max)
+    return {
+        "min_ts": min_ts,
+        "max_ts": max_ts,
+        "points": points,
+        "unique_points": unique_points,
+    }
+
+
+def list_sports_markets(manifest: Dict[str, Any]) -> List[Dict[str, Any]]:
+    markets = manifest.get("markets") if isinstance(manifest, dict) else None
+    if not isinstance(markets, list):
+        return []
+    out: List[Dict[str, Any]] = []
+    for market in markets:
+        if not isinstance(market, dict):
+            continue
+        tokens = market.get("tokens") if isinstance(market.get("tokens"), list) else []
+        stats = summarize_tokens(tokens)
+        out.append(
+            {
+                "index": market.get("index"),
+                "market_id": market.get("market_id"),
+                "condition_id": market.get("condition_id"),
+                "slug": market.get("slug"),
+                "question": market.get("question"),
+                "token_count": len(market.get("token_ids") or []),
+                "min_ts": stats["min_ts"],
+                "max_ts": stats["max_ts"],
+                "points": stats["points"],
+                "unique_points": stats["unique_points"],
+            }
+        )
+    return out
+
+
+def resolve_market_entry(manifest: Dict[str, Any], index: int) -> Optional[Dict[str, Any]]:
+    markets = manifest.get("markets") if isinstance(manifest, dict) else None
+    if not isinstance(markets, list):
+        return None
+    for market in markets:
+        if isinstance(market, dict) and market.get("index") == index:
+            return market
+    return None
+
+
 def load_metrics(data_dir: Path, user: str) -> Dict[str, Any]:
     manifest = load_manifest(data_dir, user)
     bundle = load_user_bundle(data_dir, user)
@@ -487,11 +596,17 @@ def load_metrics(data_dir: Path, user: str) -> Dict[str, Any]:
 
 app = Flask(__name__)
 DATA_DIR = Path("data/polymarket")
+SPORTS_DIR = Path("data/polymarket/sports_history")
 
 
 @app.route("/")
 def index() -> str:
     return render_template("index.html")
+
+
+@app.route("/sports")
+def sports_index() -> str:
+    return render_template("sports.html")
 
 
 @app.route("/api/users")
@@ -662,7 +777,132 @@ def api_records(user: str) -> Any:
     })
 
 
+@app.route("/api/sports/summary")
+def api_sports_summary() -> Any:
+    manifest = load_sports_manifest(SPORTS_DIR)
+    markets = list_sports_markets(manifest)
+    summary = {
+        "generated_at": manifest.get("generated_at"),
+        "start_ts": manifest.get("start_ts"),
+        "end_ts": manifest.get("end_ts"),
+        "start_ts_utc": manifest.get("start_ts_utc"),
+        "end_ts_utc": manifest.get("end_ts_utc"),
+        "fidelity": manifest.get("fidelity"),
+        "chunk_days": manifest.get("chunk_days"),
+        "markets_total": manifest.get("markets_total"),
+        "sports_markets_total": manifest.get("sports_markets_total"),
+        "available_markets": len(markets),
+    }
+    return jsonify(summary)
+
+
+@app.route("/api/sports/markets")
+def api_sports_markets() -> Any:
+    manifest = load_sports_manifest(SPORTS_DIR)
+    query = request.args.get("query", "").strip().lower()
+    markets = list_sports_markets(manifest)
+    if query:
+        filtered = []
+        for market in markets:
+            text = f"{market.get('question') or ''} {market.get('slug') or ''}".lower()
+            if query in text:
+                filtered.append(market)
+        markets = filtered
+    return jsonify({"markets": markets})
+
+
+@app.route("/api/sports/market/<int:index>")
+def api_sports_market(index: int) -> Any:
+    manifest = load_sports_manifest(SPORTS_DIR)
+    market = resolve_market_entry(manifest, index)
+    if not market:
+        return jsonify({"error": "market not found"}), 404
+    tokens = market.get("tokens") if isinstance(market.get("tokens"), list) else []
+    stats = summarize_tokens(tokens)
+    payload = dict(market)
+    payload["summary"] = stats
+    return jsonify(payload)
+
+
+@app.route("/api/sports/points")
+def api_sports_points() -> Any:
+    market_index_raw = request.args.get("market_index", "")
+    token_id = request.args.get("token_id", "")
+    sort_order = request.args.get("sort", "asc")
+    limit = int(request.args.get("limit", 1000))
+    offset = int(request.args.get("offset", 0))
+    from_ts = parse_ts_param(request.args.get("from_ts"))
+    to_ts = parse_ts_param(request.args.get("to_ts"))
+    include_raw = request.args.get("raw", "0") == "1"
+
+    if not market_index_raw.isdigit():
+        return jsonify({"error": "market_index required"}), 400
+    if not token_id:
+        return jsonify({"error": "token_id required"}), 400
+    market_index = int(market_index_raw)
+
+    manifest = load_sports_manifest(SPORTS_DIR)
+    market = resolve_market_entry(manifest, market_index)
+    if not market:
+        return jsonify({"error": "market not found"}), 404
+
+    slug = market.get("slug")
+    if not slug:
+        return jsonify({"error": "market slug missing"}), 400
+    market_dir = SPORTS_DIR / f"{market_index:05d}_{slug}"
+    points_path = market_dir / "points" / f"{token_id}.jsonl"
+    if not points_path.exists():
+        return jsonify({"error": "points file not found"}), 404
+
+    rows: List[Dict[str, Any]] = []
+    min_ts = None
+    max_ts = None
+    for row in iter_jsonl(points_path):
+        if not isinstance(row, dict):
+            continue
+        ts = row.get("ts")
+        if not isinstance(ts, int):
+            continue
+        if from_ts is not None and ts < from_ts:
+            continue
+        if to_ts is not None and ts > to_ts:
+            continue
+        min_ts = ts if min_ts is None else min(min_ts, ts)
+        max_ts = ts if max_ts is None else max(max_ts, ts)
+        payload = {
+            "ts": ts,
+            "price": row.get("price"),
+        }
+        if include_raw:
+            payload["raw"] = row.get("raw")
+        rows.append(payload)
+
+    total = len(rows)
+    if sort_order == "desc":
+        rows.sort(key=lambda r: r.get("ts", 0), reverse=True)
+    else:
+        rows.sort(key=lambda r: r.get("ts", 0))
+
+    if limit <= 0:
+        page = rows
+    else:
+        page = rows[offset : offset + min(limit, 5000)]
+
+    return jsonify({
+        "market_index": market_index,
+        "token_id": token_id,
+        "rows": page,
+        "total": total,
+        "min_ts": min_ts,
+        "max_ts": max_ts,
+        "limit": limit,
+        "offset": offset,
+        "file": str(points_path),
+    })
+
+
 if __name__ == "__main__":
     args = parse_args()
     DATA_DIR = Path(args.data_dir)
+    SPORTS_DIR = Path(args.sports_dir)
     app.run(host=args.host, port=args.port, debug=args.debug)

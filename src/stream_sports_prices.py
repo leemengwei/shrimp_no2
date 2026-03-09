@@ -69,7 +69,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--sports-tag",
         default="Sports",
-        help="Gamma markets tag/category used to filter sports markets",
+        help="Sports filter matched against /sports.sport (\"Sports\" means all sports)",
     )
     parser.add_argument("--limit-markets", type=int, default=0, help="Limit markets for testing. 0 means no limit")
     parser.add_argument(
@@ -105,17 +105,25 @@ def _fetch_sports_tag_ids(sports_tag: str) -> List[int]:
     if not isinstance(payload, list):
         return []
     needle = sports_tag.strip().lower()
-    out: List[int] = []
+    match_all = not needle or needle == "sports" or needle == "all"
+    tag_ids: Set[int] = set()
     for row in payload:
         if not isinstance(row, dict):
             continue
-        row_id = row.get("id")
-        if not isinstance(row_id, int):
+        sport_name = str(row.get("sport") or "").lower()
+        if not match_all and needle not in sport_name:
             continue
-        name = str(row.get("name") or row.get("label") or row.get("slug") or "").lower()
-        if not needle or needle in name:
-            out.append(row_id)
-    return out
+        tags = row.get("tags")
+        if isinstance(tags, str):
+            for raw in tags.split(","):
+                raw = raw.strip()
+                if not raw:
+                    continue
+                try:
+                    tag_ids.add(int(raw))
+                except ValueError:
+                    continue
+    return sorted(tag_ids)
 
 
 def fetch_sports_markets(sports_tag: str, limit_markets: int) -> List[Dict[str, Any]]:

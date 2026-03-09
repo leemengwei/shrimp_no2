@@ -7,7 +7,8 @@
 
 ## 启动命令
 ```bash
-python web/app.py --data-dir data/polymarket --host 127.0.0.1 --port 8000
+python web/app.py --data-dir data/polymarket --sports-dir data/polymarket/sports_history \
+  --host 127.0.0.1 --port 8000
 ```
 
 ## 功能
@@ -16,3 +17,9 @@ python web/app.py --data-dir data/polymarket --host 127.0.0.1 --port 8000
 - 搜索关键词（包含任意字段字符串）
 - 时间戳范围过滤（Unix秒）
 - 分页浏览
+
+## 体育历史面板
+- 访问 `/sports`
+- 市场/Token 选择 + 时间范围过滤
+- 价格点位表格 + 简单走势图
+- 支持读取 `data/polymarket/sports_history`（由 `collect_sports_history.py` 生成）
