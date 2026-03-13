@@ -25,6 +25,7 @@ from typing import Any, Dict, List, Optional, Tuple
 ADDRESS_RE = re.compile(r"^0x[a-fA-F0-9]{40}$")
 
 DATA_API = "https://data-api.polymarket.com"
+DEFAULT_OUTPUT_DIR = "data/polymarket/user_activities"
 
 ENDPOINT_MAX_LIMITS = {
     "positions": 500,
@@ -59,6 +60,11 @@ def parse_args() -> argparse.Namespace:
         default=None,
         metavar="HOURS",
         help="Fetch only recent data for all endpoints; optionally set hours (e.g. --recent 48)",
+    )
+    parser.add_argument(
+        "--out-dir",
+        default=DEFAULT_OUTPUT_DIR,
+        help="Output root directory for per-user activity bundles",
     )
     return parser.parse_args()
 
@@ -713,7 +719,7 @@ def write_bundle(out_dir: str, bundle: Dict[str, Any]) -> str:
 def main() -> None:
     args = parse_args()
     users = validate_users(args.users)
-    out_dir = "data/polymarket"
+    out_dir = args.out_dir
 
     for user in users:
         user_dir = os.path.join(out_dir, user)

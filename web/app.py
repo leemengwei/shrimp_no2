@@ -2,7 +2,7 @@
 """Local web dashboard for Polymarket user data.
 
 Example:
-  python web/app.py --data-dir data/polymarket --host 127.0.0.1 --port 8000
+  python web/app.py --data-dir data/polymarket/user_activities --host 127.0.0.1 --port 8000
 """
 
 from __future__ import annotations
@@ -12,17 +12,77 @@ import json
 import os
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional, Tuple
+from typing import Any, Dict, Iterable, List, Optional, Set, Tuple
 
 from flask import Flask, jsonify, render_template, request
+
+DEFAULT_DATA_DIR = Path("data/polymarket/user_activities")
+LEGACY_DATA_DIR = Path("data/polymarket")
+DEFAULT_SPORTS_DIR = Path("data/polymarket/sports_history")
+
+
+def resolve_data_dir(cli_data_dir: Path) -> Path:
+    # Auto-migrate default web loading path to the new user_activities folder.
+    # If old layout still exists and new one does not, fallback to legacy path.
+    if cli_data_dir == DEFAULT_DATA_DIR:
+        if DEFAULT_DATA_DIR.exists():
+            return DEFAULT_DATA_DIR
+        if LEGACY_DATA_DIR.exists():
+            return LEGACY_DATA_DIR
+    if cli_data_dir.exists():
+        return cli_data_dir
+    root = Path("data/polymarket")
+    if root.exists():
+        candidates: List[Path] = []
+        for p in root.glob("*"):
+            if not p.is_dir():
+                continue
+            has_user_dirs = any(c.is_dir() and c.name.startswith("0x") for c in p.iterdir())
+            if has_user_dirs:
+                candidates.append(p)
+        if candidates:
+            candidates.sort(key=lambda p: p.stat().st_mtime, reverse=True)
+            return candidates[0]
+    return cli_data_dir
+
+
+def resolve_sports_dir(cli_sports_dir: Path) -> Path:
+    if cli_sports_dir.exists() and (cli_sports_dir / "manifest.json").exists():
+        return cli_sports_dir
+    if cli_sports_dir == DEFAULT_SPORTS_DIR and DEFAULT_SPORTS_DIR.exists():
+        return DEFAULT_SPORTS_DIR
+
+    root = Path("data/polymarket")
+    if root.exists():
+        candidates: List[Tuple[float, Path]] = []
+        for p in root.glob("*"):
+            if not p.is_dir():
+                continue
+            manifest = p / "manifest.json"
+            if not manifest.exists():
+                continue
+            try:
+                payload = load_json(manifest)
+            except json.JSONDecodeError:
+                continue
+            if isinstance(payload, dict) and isinstance(payload.get("markets"), list):
+                candidates.append((manifest.stat().st_mtime, p))
+        if candidates:
+            candidates.sort(key=lambda x: x[0], reverse=True)
+            return candidates[0][1]
+    return cli_sports_dir
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Local web dashboard for Polymarket data")
-    parser.add_argument("--data-dir", default="data/polymarket", help="Data root directory")
+    parser.add_argument(
+        "--data-dir",
+        default=str(DEFAULT_DATA_DIR),
+        help="Data root directory (user activity bundles)",
+    )
     parser.add_argument(
         "--sports-dir",
-        default="data/polymarket/sports_history",
+        default=str(DEFAULT_SPORTS_DIR),
         help="Sports history output directory (from collect_sports_history.py)",
     )
     parser.add_argument("--host", default="0.0.0.0", help="Host to bind")
@@ -107,17 +167,35 @@ def resolve_endpoint_files(data_dir: Path, user: str, endpoint: str) -> List[Pat
         base_dir: Optional[Path] = None
         if dir_hint:
             candidate = Path(dir_hint)
+            if not candidate.is_absolute():
+                candidate = Path.cwd() / candidate
             base_dir = candidate if candidate.exists() else None
         if base_dir is None:
             base_dir = data_dir / user / "endpoints"
 
         if file_hint:
-            return [base_dir / file_hint]
+            hinted = base_dir / file_hint
+            if hinted.exists():
+                return [hinted]
+            fallback_file = data_dir / user / "endpoints" / file_hint
+            if fallback_file.exists():
+                return [fallback_file]
+            return [hinted]
         if base_dir.exists() and base_dir.is_dir():
             pattern = info.get("pattern")
             if isinstance(pattern, str) and "%06d" in pattern:
                 glob_pattern = pattern.replace("%06d", "*")
-                return sorted(base_dir.glob(glob_pattern))
+                files = sorted(base_dir.glob(glob_pattern))
+                if files:
+                    return files
+                # Some manifests store endpoint dir hints at root `.../endpoints`,
+                # while page files are under `.../endpoints/<endpoint>/`.
+                nested_dir = base_dir / endpoint
+                if nested_dir.exists() and nested_dir.is_dir():
+                    nested_files = sorted(nested_dir.glob(glob_pattern))
+                    if nested_files:
+                        return nested_files
+                return files
             return sorted(p for p in base_dir.iterdir() if p.is_file() and p.suffix == ".json")
 
     # Fallback to conventional layout
@@ -154,6 +232,29 @@ def extract_ts(row: Dict[str, Any]) -> Optional[int]:
         if isinstance(val, str) and val.isdigit():
             return int(val)
     return None
+
+
+def _sort_text(value: Any) -> str:
+    if value is None:
+        return ""
+    return str(value)
+
+
+def _activity_row_tie_breaker(row: Dict[str, Any]) -> Tuple[str, ...]:
+    return (
+        _sort_text(row.get("transactionHash")),
+        _sort_text(row.get("asset")),
+        _sort_text(row.get("conditionId")),
+        _sort_text(row.get("outcomeIndex")),
+        _sort_text(row.get("side")),
+        _sort_text(row.get("price")),
+        _sort_text(row.get("size")),
+    )
+
+
+def _activity_row_sort_key(row: Dict[str, Any]) -> Tuple[Any, ...]:
+    ts = extract_ts(row)
+    return (ts if ts is not None else -1, *_activity_row_tie_breaker(row))
 
 
 def parse_ts_param(raw: Optional[str]) -> Optional[int]:
@@ -305,168 +406,6 @@ def apply_compact_view(endpoint: str, rows: List[Dict[str, Any]]) -> Tuple[List[
     return trimmed, columns
 
 
-def _to_float(val: Any) -> Optional[float]:
-    if isinstance(val, (int, float)):
-        return float(val)
-    if isinstance(val, str):
-        try:
-            return float(val)
-        except ValueError:
-            return None
-    return None
-
-
-def _normalize_outcome_index(raw: Any) -> Optional[int]:
-    if isinstance(raw, int):
-        return raw
-    if isinstance(raw, str) and raw.isdigit():
-        return int(raw)
-    return None
-
-
-def _collect_activity_outcomes(rows: List[Dict[str, Any]]) -> Dict[str, List[Dict[str, Any]]]:
-    by_condition: Dict[str, Dict[str, Dict[str, Any]]] = {}
-    for row in rows:
-        if not isinstance(row, dict):
-            continue
-        condition_id = str(row.get("conditionId") or "").strip()
-        if not condition_id:
-            continue
-        outcome = str(row.get("outcome") or "").strip()
-        outcome_index = _normalize_outcome_index(row.get("outcomeIndex"))
-        if outcome_index is not None and outcome_index == 999:
-            outcome_index = None
-
-        key = None
-        if outcome_index is not None:
-            key = f"idx:{outcome_index}"
-        elif outcome:
-            key = f"name:{outcome}"
-        if not key:
-            continue
-
-        entry = by_condition.setdefault(condition_id, {})
-        if key not in entry:
-            entry[key] = {
-                "outcome": outcome,
-                "outcomeIndex": outcome_index,
-            }
-        else:
-            if not entry[key].get("outcome") and outcome:
-                entry[key]["outcome"] = outcome
-            if entry[key].get("outcomeIndex") is None and outcome_index is not None:
-                entry[key]["outcomeIndex"] = outcome_index
-
-    normalized: Dict[str, List[Dict[str, Any]]] = {}
-    for condition_id, outcomes in by_condition.items():
-        items = list(outcomes.values())
-
-        def _sort_key(item: Dict[str, Any]) -> Tuple[int, int, str]:
-            idx = item.get("outcomeIndex")
-            idx_val = idx if isinstance(idx, int) else 999999
-            return (0 if isinstance(idx, int) else 1, idx_val, str(item.get("outcome") or ""))
-
-        items.sort(key=_sort_key)
-        normalized[condition_id] = items
-    return normalized
-
-
-def apply_activity_shares_summary(rows: List[Dict[str, Any]]) -> None:
-    outcomes = _collect_activity_outcomes(rows)
-    rows_sorted = sorted(
-        (row for row in rows if isinstance(row, dict)),
-        key=lambda r: extract_ts(r) if extract_ts(r) is not None else -1,
-    )
-    cumulative: Dict[Tuple[str, str], float] = {}
-
-    for row in rows_sorted:
-        row["shares_summary"] = ""
-        action_type = str(row.get("type") or "").upper()
-        condition_id = str(row.get("conditionId") or "").strip()
-        if not condition_id:
-            continue
-        size = _to_float(row.get("size"))
-        if size is None:
-            continue
-
-        if action_type not in {"TRADE", "SPLIT", "MERGE", "REDEEM"}:
-            continue
-
-        pieces: List[str] = []
-
-        def _label_for(outcome_label: str, outcome_index: Optional[int]) -> str:
-            if outcome_label:
-                return outcome_label
-            if outcome_index is not None:
-                return f"#{outcome_index}"
-            return "ALL"
-
-        def _outcome_key(outcome_label: str, outcome_index: Optional[int]) -> str:
-            if isinstance(outcome_index, int):
-                return f"idx:{outcome_index}"
-            if outcome_label:
-                return f"name:{outcome_label}"
-            return "all:unknown"
-
-        if action_type == "TRADE":
-            side = str(row.get("side") or "").upper()
-            delta = size if side == "BUY" else -size if side == "SELL" else 0.0
-            if delta == 0:
-                continue
-            outcome_index = _normalize_outcome_index(row.get("outcomeIndex"))
-            if outcome_index == 999:
-                outcome_index = None
-            outcome_label = str(row.get("outcome") or "").strip()
-            outcome_key = _outcome_key(outcome_label, outcome_index)
-            cum_key = (condition_id, outcome_key)
-            cumulative[cum_key] = cumulative.get(cum_key, 0.0) + delta
-            label = _label_for(outcome_label, outcome_index)
-            pieces.append(f"{label}:{delta:+g} ({cumulative[cum_key]:g})")
-
-        elif action_type == "REDEEM":
-            known_outcomes = outcomes.get(condition_id, [])
-            if not known_outcomes:
-                pieces.append("REDEEM:unknown")
-            else:
-                for outcome_info in known_outcomes:
-                    outcome_label = str(outcome_info.get("outcome") or "").strip()
-                    outcome_index = outcome_info.get("outcomeIndex")
-                    outcome_key = _outcome_key(outcome_label, outcome_index)
-                    cum_key = (condition_id, outcome_key)
-                    current = cumulative.get(cum_key, 0.0)
-                    if current == 0:
-                        continue
-                    delta = -current
-                    cumulative[cum_key] = 0.0
-                    label = _label_for(outcome_label, outcome_index)
-                    pieces.append(f"{label}:{delta:+g} (0)")
-
-        else:
-            delta = size if action_type == "SPLIT" else -size
-            known_outcomes = outcomes.get(condition_id, [])
-            if not known_outcomes:
-                outcome_label = "ALL"
-                outcome_index = None
-                outcome_key = _outcome_key(outcome_label, outcome_index)
-                cum_key = (condition_id, outcome_key)
-                cumulative[cum_key] = cumulative.get(cum_key, 0.0) + delta
-                pieces.append(f"{outcome_label}:{delta:+g} ({cumulative[cum_key]:g})")
-            else:
-                for outcome_info in known_outcomes:
-                    outcome_label = str(outcome_info.get("outcome") or "").strip()
-                    outcome_index = outcome_info.get("outcomeIndex")
-                    outcome_key = _outcome_key(outcome_label, outcome_index)
-                    cum_key = (condition_id, outcome_key)
-                    cumulative[cum_key] = cumulative.get(cum_key, 0.0) + delta
-                    label = _label_for(outcome_label, outcome_index)
-                    pieces.append(f"{label}:{delta:+g} ({cumulative[cum_key]:g})")
-
-        if not pieces:
-            continue
-
-        row["shares_summary"] = ", ".join(pieces)
-
-
 def summarize_rows(rows: Iterable[Dict[str, Any]]) -> Dict[str, Any]:
     total = 0
     min_ts: Optional[int] = None
@@ -490,6 +429,25 @@ def load_sports_manifest(sports_dir: Path) -> Dict[str, Any]:
     if path.exists():
         return load_json(path)
     return {}
+
+
+def resolve_sports_market_dir(sports_dir: Path, market: Dict[str, Any]) -> Optional[Path]:
+    index = market.get("index")
+    if not isinstance(index, int):
+        return None
+    slug = str(market.get("slug") or "").strip()
+    if slug:
+        exact = sports_dir / f"{index:05d}_{slug}"
+        if exact.exists() and exact.is_dir():
+            return exact
+    prefix = f"{index:05d}_"
+    matches = sorted(
+        (p for p in sports_dir.glob(f"{prefix}*") if p.is_dir()),
+        key=lambda p: p.name,
+    )
+    if matches:
+        return matches[0]
+    return None
 
 
 def iter_jsonl(path: Path) -> Iterable[Any]:
@@ -554,6 +512,13 @@ def list_sports_markets(manifest: Dict[str, Any]) -> List[Dict[str, Any]]:
                 "unique_points": stats["unique_points"],
             }
         )
+    out.sort(
+        key=lambda m: (
+            -(int(m.get("points") or 0)),
+            -(int(m.get("unique_points") or 0)),
+            int(m.get("index") or 0),
+        )
+    )
     return out
 
 
@@ -595,8 +560,16 @@ def load_metrics(data_dir: Path, user: str) -> Dict[str, Any]:
 
 
 app = Flask(__name__)
-DATA_DIR = Path("data/polymarket")
-SPORTS_DIR = Path("data/polymarket/sports_history")
+DATA_DIR = resolve_data_dir(DEFAULT_DATA_DIR)
+SPORTS_DIR = DEFAULT_SPORTS_DIR
+def _stable_row_sort_key(row: Dict[str, Any]) -> Tuple[Any, ...]:
+    return _activity_row_sort_key(row)
+
+
+def _stable_row_sort_key_desc(row: Dict[str, Any]) -> Tuple[Any, ...]:
+    ts = extract_ts(row)
+    ts_key = -(ts if ts is not None else -1)
+    return (ts_key, *_activity_row_tie_breaker(row))
 
 
 @app.route("/")
@@ -633,7 +606,13 @@ def api_endpoints(user: str) -> Any:
     else:
         base = DATA_DIR / user / "endpoints"
         if base.exists():
-            endpoints = sorted(p.name for p in base.iterdir() if p.is_dir())
+            guessed: Set[str] = set()
+            for p in base.iterdir():
+                if p.is_dir():
+                    guessed.add(p.name)
+                elif p.is_file() and p.suffix == ".json":
+                    guessed.add(p.stem)
+            endpoints = sorted(guessed)
     return jsonify({"endpoints": endpoints})
 
 
@@ -733,14 +712,6 @@ def api_records(user: str) -> Any:
     if not files:
         return jsonify({"rows": [], "total": 0, "endpoint": endpoint})
 
-    rows_iter = read_endpoint_pages(files)
-    if endpoint == "activity":
-        def _filter_yield(rows: Iterable[Any]) -> Iterable[Any]:
-            for row in rows:
-                if isinstance(row, dict) and str(row.get("type", "")).upper() == "YIELD":
-                    continue
-                yield row
-        rows_iter = _filter_yield(rows_iter)
     column_filters = None
     if filters_raw:
         try:
@@ -750,17 +721,21 @@ def api_records(user: str) -> Any:
         except json.JSONDecodeError:
             column_filters = None
 
+    rows_iter = read_endpoint_pages(files)
+    if endpoint == "activity":
+        def _filter_yield(rows: Iterable[Any]) -> Iterable[Any]:
+            for row in rows:
+                if isinstance(row, dict) and str(row.get("type", "")).upper() == "YIELD":
+                    continue
+                yield row
+        rows_iter = _filter_yield(rows_iter)
+
     filtered, all_columns = filter_rows(rows_iter, query, from_ts_i, to_ts_i, column_filters)
 
-    if endpoint == "activity":
-        apply_activity_shares_summary(filtered)
-        all_columns = sorted(set().union(*[row.keys() for row in filtered])) if filtered else []
-
-    if sort_order in ("asc", "desc"):
-        filtered.sort(
-            key=lambda row: extract_ts(row) if extract_ts(row) is not None else -1,
-            reverse=sort_order == "desc",
-        )
+    if sort_order == "asc":
+        filtered.sort(key=_stable_row_sort_key)
+    elif sort_order == "desc":
+        filtered.sort(key=_stable_row_sort_key_desc)
     page, total = paginate(filtered, limit, offset)
     columns: List[str] = []
     if view == "compact":
@@ -846,10 +821,9 @@ def api_sports_points() -> Any:
     if not market:
         return jsonify({"error": "market not found"}), 404
 
-    slug = market.get("slug")
-    if not slug:
-        return jsonify({"error": "market slug missing"}), 400
-    market_dir = SPORTS_DIR / f"{market_index:05d}_{slug}"
+    market_dir = resolve_sports_market_dir(SPORTS_DIR, market)
+    if market_dir is None:
+        return jsonify({"error": "market dir not found"}), 404
     points_path = market_dir / "points" / f"{token_id}.jsonl"
     if not points_path.exists():
         return jsonify({"error": "points file not found"}), 404
@@ -903,6 +877,6 @@ def api_sports_points() -> Any:
 
 if __name__ == "__main__":
     args = parse_args()
-    DATA_DIR = Path(args.data_dir)
-    SPORTS_DIR = Path(args.sports_dir)
+    DATA_DIR = resolve_data_dir(Path(args.data_dir))
+    SPORTS_DIR = resolve_sports_dir(Path(args.sports_dir))
     app.run(host=args.host, port=args.port, debug=args.debug)

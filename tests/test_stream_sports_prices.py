@@ -1,6 +1,6 @@
 import unittest
 
-from src.stream_sports_prices import (
+from src.collect_stream_sports_prices import (
     extract_asset_ids,
     make_connection_batches,
     maybe_collect_events,

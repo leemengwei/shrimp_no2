@@ -56,6 +56,8 @@ const generatedAt = document.getElementById("generatedAt");
 const fetchedAt = document.getElementById("fetchedAt");
 const tableHead = document.getElementById("tableHead");
 const tableBody = document.getElementById("tableBody");
+const loadingBar = document.getElementById("loadingBar");
+const loadingText = document.getElementById("loadingText");
 
 function formatTs(ts) {
   if (!ts) return "-";
@@ -75,6 +77,33 @@ async function fetchJson(url, options = {}) {
   const res = await fetch(url, options);
   if (!res.ok) throw new Error(`Request failed: ${res.status}`);
   return await res.json();
+}
+
+function setLoading(isLoading, text = "加载中...") {
+  if (loadingBar) loadingBar.classList.toggle("hidden", !isLoading);
+  if (loadingText) loadingText.textContent = text;
+  const controls = [
+    userSelect, endpointSelect, queryInput, fromTsInput, toTsInput,
+    applyBtn, resetBtn, prevBtn, nextBtn, limitSelect, sortSelect,
+    showAllBtn, hideAllBtn, clearFiltersBtn, saveConfigBtn,
+    configSelect, saveAsBtn, deleteConfigBtn,
+  ];
+  controls.forEach((el) => {
+    if (el) el.disabled = isLoading;
+  });
+}
+
+function clearViewForLoading(message = "加载中...") {
+  tableHead.innerHTML = "";
+  tableBody.innerHTML = `<tr><td colspan="1">${message}</td></tr>`;
+  totalCount.textContent = "-";
+  pageInfo.textContent = "-";
+  endpointTotal.textContent = "-";
+  endpointRange.textContent = "-";
+  positionsValue.textContent = "-";
+  tradedMarkets.textContent = "-";
+  generatedAt.textContent = "-";
+  fetchedAt.textContent = "-";
 }
 
 function updateSummary(meta) {
@@ -144,6 +173,8 @@ function formatCellValue(col, val) {
 }
 
 function sortRows(rows) {
+  // Keep activity ordering fully backend-driven to avoid page-level reordering glitches.
+  if (state.endpoint === "activity") return rows;
   if (!state.sortColumn) return rows;
   const col = state.sortColumn;
   const dir = state.sortDirection === "desc" ? -1 : 1;
@@ -152,6 +183,16 @@ function sortRows(rows) {
     const bv = b[col];
     if (av === undefined || av === null) return 1;
     if (bv === undefined || bv === null) return -1;
+    if (col === "timestamp" || col === "createdAt" || col === "created_at" || col === "time") {
+      const an = typeof av === "number" ? av : Number(av);
+      const bn = typeof bv === "number" ? bv : Number(bv);
+      if (!Number.isNaN(an) && !Number.isNaN(bn) && an !== bn) return (an - bn) * dir;
+      const atx = String(a.transactionHash || "");
+      const btx = String(b.transactionHash || "");
+      if (atx < btx) return -1 * dir;
+      if (atx > btx) return 1 * dir;
+      return 0;
+    }
     if (typeof av === "number" && typeof bv === "number") return (av - bv) * dir;
     const as = String(av).toLowerCase();
     const bs = String(bv).toLowerCase();
@@ -179,6 +220,7 @@ function orderColumns(columns) {
     "outcome",
     "outcomeIndex",
     "side",
+    "shares_summary",
     "price",
     "avgPrice",
     "size",
@@ -207,6 +249,122 @@ function orderColumns(columns) {
   return ordered;
 }
 
+function toNumber(val) {
+  if (typeof val === "number" && Number.isFinite(val)) return val;
+  if (typeof val === "string" && val.trim() !== "") {
+    const n = Number(val);
+    return Number.isFinite(n) ? n : null;
+  }
+  return null;
+}
+
+function normalizeOutcomeIndex(raw) {
+  if (typeof raw === "number" && Number.isInteger(raw)) return raw;
+  if (typeof raw === "string" && /^[0-9]+$/.test(raw)) return parseInt(raw, 10);
+  return null;
+}
+
+function formatShares(val) {
+  const text = Number(val).toFixed(2).replace(/\.?0+$/, "");
+  return text === "-0" ? "0" : text;
+}
+
+function estimateSharesSummaryForPage(rows) {
+  const cumulative = new Map();
+  const knownOutcomes = new Map();
+  const conditionPrefix = (conditionId) => `${conditionId}::`;
+  const makeKey = (conditionId, outcomeKey) => `${conditionId}::${outcomeKey}`;
+  const labelFromOutcome = (outcome, outcomeIndex) => {
+    if (outcome) return outcome;
+    if (outcomeIndex !== null && outcomeIndex !== undefined) return `#${outcomeIndex}`;
+    return "ALL";
+  };
+  const outcomeInfoFromRow = (row) => {
+    const outcome = String(row.outcome || "").trim();
+    let outcomeIndex = normalizeOutcomeIndex(row.outcomeIndex);
+    if (outcomeIndex === 999) outcomeIndex = null;
+    if (outcomeIndex !== null) {
+      const label = labelFromOutcome(outcome, outcomeIndex);
+      return { key: `idx:${outcomeIndex}|label:${label}`, label };
+    }
+    if (outcome) return { key: `name:${outcome}|label:${outcome}`, label: outcome };
+    return { key: "all:unknown|label:ALL", label: "ALL" };
+  };
+
+  for (let i = rows.length - 1; i >= 0; i -= 1) {
+    const row = rows[i];
+    if (!row || typeof row !== "object") continue;
+    const conditionId = String(row.conditionId || "").trim();
+    if (!conditionId) continue;
+    const info = outcomeInfoFromRow(row);
+    if (info.key.startsWith("all:unknown")) continue;
+    if (!knownOutcomes.has(conditionId)) knownOutcomes.set(conditionId, new Map());
+    knownOutcomes.get(conditionId).set(info.key, info.label);
+  }
+
+  for (let i = rows.length - 1; i >= 0; i -= 1) {
+    const row = rows[i];
+    if (!row || typeof row !== "object") continue;
+    row.shares_summary = "";
+
+    const actionType = String(row.type || "").toUpperCase();
+    const conditionId = String(row.conditionId || "").trim();
+    if (!conditionId) continue;
+    const size = toNumber(row.size);
+    if (size === null) continue;
+
+    if (actionType === "TRADE") {
+      const side = String(row.side || "").toUpperCase();
+      const delta = side === "BUY" ? size : side === "SELL" ? -size : 0;
+      if (delta !== 0) {
+        const outcome = outcomeInfoFromRow(row);
+        const key = makeKey(conditionId, outcome.key);
+        cumulative.set(key, (cumulative.get(key) || 0) + delta);
+      }
+    } else if (actionType === "SPLIT" || actionType === "MERGE") {
+      const delta = actionType === "SPLIT" ? size : -size;
+      const conditionKnown = knownOutcomes.get(conditionId);
+      if (conditionKnown && conditionKnown.size > 0) {
+        Array.from(conditionKnown.keys()).forEach((outcomeKey) => {
+          const key = makeKey(conditionId, outcomeKey);
+          cumulative.set(key, (cumulative.get(key) || 0) + delta);
+        });
+      } else {
+        const key = makeKey(conditionId, "all:unknown|label:ALL");
+        cumulative.set(key, (cumulative.get(key) || 0) + delta);
+      }
+    } else if (actionType === "REDEEM") {
+      const prefix = conditionPrefix(conditionId);
+      Array.from(cumulative.keys()).forEach((k) => {
+        if (k.startsWith(prefix)) cumulative.set(k, 0);
+      });
+    } else {
+      continue;
+    }
+
+    const prefix = conditionPrefix(conditionId);
+    const pieces = [];
+    const conditionKnown = knownOutcomes.get(conditionId) || new Map();
+    Array.from(conditionKnown.keys())
+      .sort((a, b) => a.localeCompare(b))
+      .forEach((outcomeKey) => {
+        const v = cumulative.get(makeKey(conditionId, outcomeKey)) || 0;
+        const label = conditionKnown.get(outcomeKey) || outcomeKey.split("|label:")[1] || "ALL";
+        pieces.push(`${label}:${formatShares(v)}`);
+      });
+    Array.from(cumulative.entries())
+      .filter(([k]) => k.startsWith(prefix))
+      .sort((a, b) => a[0].localeCompare(b[0]))
+      .forEach(([k, v]) => {
+        const outcomeKey = k.slice(prefix.length);
+        if (conditionKnown.has(outcomeKey)) return;
+        const label = outcomeKey.split("|label:")[1] || "ALL";
+        pieces.push(`${label}:${formatShares(v)}`);
+      });
+    row.shares_summary = pieces.join(", ");
+  }
+}
+
 function buildTable(rows, columnsOverride) {
   tableHead.innerHTML = "";
   tableBody.innerHTML = "";
@@ -228,17 +386,18 @@ function buildTable(rows, columnsOverride) {
   const order = state.columnOrder.length > 0 ? state.columnOrder : orderColumns(allColumns);
   const columns = order.filter((col) => allColumns.includes(col) && state.visibleColumns.has(col));
   const displayColumns = ["#"].concat(columns);
+  const canClientSort = state.endpoint !== "activity";
   for (const col of displayColumns) {
     const th = document.createElement("th");
     th.textContent = col;
-    th.className = col === "#" ? "index-col" : "sortable";
+    th.className = col === "#" ? "index-col" : (canClientSort ? "sortable" : "");
     if (col !== "#" && state.columnWidths[col]) {
       th.style.width = `${state.columnWidths[col]}px`;
     }
     if (state.sortColumn === col) {
       th.dataset.sort = state.sortDirection;
     }
-    if (col !== "#") th.addEventListener("click", () => {
+    if (col !== "#" && canClientSort) th.addEventListener("click", () => {
       if (state.sortColumn === col) {
         state.sortDirection = state.sortDirection === "asc" ? "desc" : "asc";
       } else {
@@ -459,74 +618,77 @@ async function loadEndpointSummary() {
 
 async function loadRecords() {
   if (!state.user || !state.endpoint) return;
-  const params = new URLSearchParams({
-    endpoint: state.endpoint,
-    limit: state.limit.toString(),
-    offset: state.offset.toString(),
-    view: state.view,
-    sort: state.sort,
-  });
-  if (state.query) params.append("query", state.query);
-  if (state.fromTs) params.append("from_ts", state.fromTs);
-  if (state.toTs) params.append("to_ts", state.toTs);
-  const activeFilters = Object.entries(state.columnFilters)
-    .filter(([, val]) => val)
-    .reduce((acc, [key, val]) => {
-      acc[key] = val;
-      return acc;
-    }, {});
-  if (Object.keys(activeFilters).length > 0) {
-    params.append("filters", JSON.stringify(activeFilters));
-  }
+  setLoading(true, `加载 ${state.endpoint} 数据中...`);
+  try {
+    const params = new URLSearchParams({
+      endpoint: state.endpoint,
+      limit: state.limit.toString(),
+      offset: state.offset.toString(),
+      view: state.view,
+      sort: state.sort,
+    });
+    if (state.query) params.append("query", state.query);
+    if (state.fromTs) params.append("from_ts", state.fromTs);
+    if (state.toTs) params.append("to_ts", state.toTs);
+    const activeFilters = Object.entries(state.columnFilters)
+      .filter(([, val]) => val)
+      .reduce((acc, [key, val]) => {
+        acc[key] = val;
+        return acc;
+      }, {});
+    if (Object.keys(activeFilters).length > 0) {
+      params.append("filters", JSON.stringify(activeFilters));
+    }
 
-  const data = await fetchJson(`/api/user/${state.user}/records?${params.toString()}`);
-  state.total = data.total || 0;
-  state.lastRows = data.rows || [];
-  const baseColumns = (data.all_columns && data.all_columns.length > 0)
-    ? data.all_columns
-    : (data.columns && data.columns.length > 0)
-      ? data.columns
-      : Object.keys((state.lastRows[0] || {}));
-  state.lastColumns = baseColumns;
-  let columnsUpdated = false;
-  if (state.visibleColumns.size === 0 || state.forceAllColumns) {
-    state.visibleColumns = new Set(state.lastColumns);
-    state.forceAllColumns = false;
-    columnsUpdated = true;
-  } else {
-    for (const col of state.lastColumns) {
-      if (col.startsWith("shares_")) {
-        if (!state.visibleColumns.has(col)) {
-          state.visibleColumns.add(col);
+    const data = await fetchJson(`/api/user/${state.user}/records?${params.toString()}`);
+    state.total = data.total || 0;
+    state.lastRows = data.rows || [];
+    if (state.endpoint === "activity") {
+      estimateSharesSummaryForPage(state.lastRows);
+    }
+    const baseColumns = (data.all_columns && data.all_columns.length > 0)
+      ? data.all_columns
+      : (data.columns && data.columns.length > 0)
+        ? data.columns
+        : Object.keys((state.lastRows[0] || {}));
+    if (state.endpoint === "activity" && !baseColumns.includes("shares_summary")) {
+      state.lastColumns = [...baseColumns, "shares_summary"];
+    } else {
+      state.lastColumns = baseColumns;
+    }
+    let columnsUpdated = false;
+    if (state.visibleColumns.size === 0 || state.forceAllColumns) {
+      state.visibleColumns = new Set(state.lastColumns);
+      state.forceAllColumns = false;
+      columnsUpdated = true;
+    }
+    state.lastColumnsKey = state.lastColumns.join("|");
+    if (state.columnOrder.length === 0) {
+      state.columnOrder = orderColumns(state.lastColumns);
+      columnsUpdated = true;
+    } else {
+      const existing = new Set(state.columnOrder);
+      for (const col of state.lastColumns) {
+        if (!existing.has(col)) {
+          state.columnOrder.push(col);
+          existing.add(col);
           columnsUpdated = true;
         }
       }
     }
-  }
-  state.lastColumnsKey = state.lastColumns.join("|");
-  if (state.columnOrder.length === 0) {
-    state.columnOrder = orderColumns(state.lastColumns);
-    columnsUpdated = true;
-  } else {
-    const existing = new Set(state.columnOrder);
-    for (const col of state.lastColumns) {
-      if (!existing.has(col)) {
-        state.columnOrder.push(col);
-        existing.add(col);
-        columnsUpdated = true;
-      }
+    if (columnsUpdated) {
+      persistColumnState();
     }
+    buildTable(state.lastRows, state.lastColumns);
+    if (columnGrid.dataset.columnsKey !== state.lastColumnsKey || columnGrid.children.length === 0) {
+      renderColumnControls(state.lastColumns);
+      columnGrid.dataset.columnsKey = state.lastColumnsKey;
+    }
+    await loadSummary();
+    await loadEndpointSummary();
+  } finally {
+    setLoading(false);
   }
-  if (columnsUpdated) {
-    persistColumnState();
-  }
-  buildTable(state.lastRows, state.lastColumns);
-  if (columnGrid.dataset.columnsKey !== state.lastColumnsKey) {
-    renderColumnControls(state.lastColumns);
-    columnGrid.dataset.columnsKey = state.lastColumnsKey;
-  }
-  await loadSummary();
-  await loadEndpointSummary();
 }
 
 function resetFilters() {
@@ -544,22 +706,26 @@ applyBtn.addEventListener("click", async () => {
   state.fromTs = fromTsInput.value.trim();
   state.toTs = toTsInput.value.trim();
   state.offset = 0;
+  clearViewForLoading("筛选中...");
   await loadRecords();
 });
 
 resetBtn.addEventListener("click", async () => {
   resetFilters();
+  clearViewForLoading("重置并加载中...");
   await loadRecords();
 });
 
 prevBtn.addEventListener("click", async () => {
   state.offset = Math.max(0, state.offset - state.limit);
+  clearViewForLoading("分页加载中...");
   await loadRecords();
 });
 
 nextBtn.addEventListener("click", async () => {
   if (state.offset + state.limit < state.total) {
     state.offset += state.limit;
+    clearViewForLoading("分页加载中...");
     await loadRecords();
   }
 });
@@ -567,12 +733,14 @@ nextBtn.addEventListener("click", async () => {
 limitSelect.addEventListener("change", async (e) => {
   state.limit = parseInt(e.target.value, 10);
   state.offset = 0;
+  clearViewForLoading("更新分页中...");
   await loadRecords();
 });
 
 sortSelect.addEventListener("change", async (e) => {
   state.sort = e.target.value;
   state.offset = 0;
+  clearViewForLoading("排序中...");
   await loadRecords();
 });
 
@@ -584,6 +752,13 @@ userSelect.addEventListener("change", async (e) => {
   state.columnFilters = {};
   state.sortColumn = "";
   state.sortDirection = "asc";
+  state.lastRows = [];
+  state.lastColumns = [];
+  state.lastColumnsKey = "";
+  tableHead.innerHTML = "";
+  columnGrid.innerHTML = "";
+  columnGrid.dataset.columnsKey = "";
+  clearViewForLoading("用户切换中...");
   await loadEndpoints();
   await loadMetrics();
   await loadSummary();
@@ -599,6 +774,13 @@ endpointSelect.addEventListener("change", async (e) => {
   state.columnFilters = {};
   state.sortColumn = "";
   state.sortDirection = "asc";
+  state.lastRows = [];
+  state.lastColumns = [];
+  state.lastColumnsKey = "";
+  tableHead.innerHTML = "";
+  columnGrid.innerHTML = "";
+  columnGrid.dataset.columnsKey = "";
+  clearViewForLoading("端点切换中...");
   await loadConfigs();
   await loadRecords();
 });
@@ -620,6 +802,7 @@ hideAllBtn.addEventListener("click", async () => {
 
 clearFiltersBtn.addEventListener("click", async () => {
   state.columnFilters = {};
+  clearViewForLoading("清除筛选中...");
   await loadRecords();
   persistColumnState();
 });
@@ -645,6 +828,7 @@ function refreshConfigSelect() {
 configSelect.addEventListener("change", async (e) => {
   state.activeConfig = e.target.value;
   loadColumnState();
+  clearViewForLoading("应用配置中...");
   await loadRecords();
 });
 

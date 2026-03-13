@@ -2,7 +2,7 @@
 """High-throughput real-time sports market price collector for Polymarket.
 
 Example:
-  python3 src/stream_sports_prices.py \
+  python3 src/collect_stream_sports_prices.py \
     --output data/realtime/sports_ticks.jsonl \
     --snapshot-output data/realtime/sports_latest_snapshot.json \
     --batch-size 350 \

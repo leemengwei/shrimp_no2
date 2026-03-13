@@ -1,11 +1,11 @@
 :root {
-  --bg: #0b0f14;
-  --panel: #111826;
-  --text: #e6edf3;
-  --muted: #8aa0b6;
-  --accent: #47c0ff;
-  --border: #1f2a3a;
-  --panel-2: #0f1520;
+  --bg: #f7f1de;
+  --panel: #fff9ea;
+  --text: #45351a;
+  --muted: #857153;
+  --accent: #c98a2d;
+  --border: #e3d2ad;
+  --panel-2: #f3e7cd;
 }
 
 * {
@@ -15,7 +15,7 @@
 body {
   margin: 0;
   font-family: "IBM Plex Sans", "Segoe UI", Arial, sans-serif;
-  background: radial-gradient(circle at top left, #1a2230, #0b0f14 55%);
+  background: radial-gradient(circle at top left, #fff8e8, #f7f1de 60%);
   color: var(--text);
   font-size: 13px;
 }
@@ -109,7 +109,7 @@ input[type="checkbox"] {
 button {
   background: var(--accent);
   border: none;
-  color: #0b0f14;
+  color: #fffdf7;
   padding: 8px 12px;
   border-radius: 6px;
   cursor: pointer;
@@ -152,6 +152,34 @@ button.ghost {
   border-radius: 10px;
   border: 1px solid var(--border);
   padding: 12px;
+}
+
+.loading-bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 10px;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.loading-bar.hidden {
+  display: none;
+}
+
+.spinner {
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  border: 2px solid #e8d8b8;
+  border-top-color: var(--accent);
+  animation: spin 0.8s linear infinite;
+}
+
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
 }
 
 .chart-section {
@@ -213,7 +241,7 @@ button.ghost {
   grid-template-columns: 18px 20px 1fr 1fr;
   align-items: center;
   gap: 6px;
-  background: #0d1320;
+  background: #fff4dd;
   border: 1px solid var(--border);
   border-radius: 6px;
   padding: 6px 8px;
@@ -296,7 +324,7 @@ table {
 thead th {
   position: sticky;
   top: 0;
-  background: #111b2c;
+  background: #f1e2c2;
   color: var(--muted);
   text-align: left;
   font-size: 11px;
@@ -362,7 +390,7 @@ tbody td {
 }
 
 tbody tr:hover {
-  background: rgba(71, 192, 255, 0.08);
+  background: rgba(201, 138, 45, 0.14);
 }
 
 .thumb {

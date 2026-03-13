@@ -79,8 +79,12 @@ function updateSummary() {
     pointsCount.textContent = `${state.total}`;
     rangeInfo.textContent = `${formatTs(state.summaryMinTs)} ~ ${formatTs(state.summaryMaxTs)}`;
   } else {
-    pointsCount.textContent = "-";
-    rangeInfo.textContent = "-";
+    pointsCount.textContent = state.total ? `${state.total}` : "-";
+    if (state.market && state.market.summary && state.market.summary.min_ts && state.market.summary.max_ts) {
+      rangeInfo.textContent = `${formatTs(state.market.summary.min_ts)} ~ ${formatTs(state.market.summary.max_ts)}`;
+    } else {
+      rangeInfo.textContent = "当前市场暂无历史点位，请切换市场或重跑历史抓取";
+    }
   }
   if (state.market) {
     marketInfo.textContent = `${state.market.index} / ${state.market.question || "-"}`;
@@ -124,11 +128,11 @@ function drawChart() {
   const w = priceChart.width;
   const h = priceChart.height;
   ctx.clearRect(0, 0, w, h);
-  ctx.fillStyle = "#0f1520";
+  ctx.fillStyle = "#fff6e2";
   ctx.fillRect(0, 0, w, h);
 
   if (!state.rows.length) {
-    ctx.fillStyle = "#8aa0b6";
+    ctx.fillStyle = "#857153";
     ctx.font = "12px sans-serif";
     ctx.fillText("无数据", 12, 24);
     return;
@@ -144,7 +148,7 @@ function drawChart() {
   const xScale = maxTs === minTs ? 1 : w / (maxTs - minTs);
   const yScale = maxPrice === minPrice ? 1 : (h - 20) / (maxPrice - minPrice);
 
-  ctx.strokeStyle = "#47c0ff";
+  ctx.strokeStyle = "#c98a2d";
   ctx.lineWidth = 1.5;
   ctx.beginPath();
   rows.forEach((row, idx) => {
@@ -211,9 +215,15 @@ async function selectMarket(index) {
   if (!index) return;
   const market = await fetchJson(`/api/sports/market/${index}`);
   state.market = market;
-  state.tokens = market.tokens || [];
+  state.tokens = (market.tokens || []).slice().sort((a, b) => (b.points || 0) - (a.points || 0));
   populateTokenSelect(state.tokens);
   state.token = tokenSelect.value || null;
+  if (!fromTsInput.value && market.summary && market.summary.min_ts) {
+    fromTsInput.value = String(market.summary.min_ts);
+  }
+  if (!toTsInput.value && market.summary && market.summary.max_ts) {
+    toTsInput.value = String(market.summary.max_ts);
+  }
   updateSummary();
 }
 
