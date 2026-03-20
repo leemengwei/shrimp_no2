@@ -3,27 +3,27 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>体育历史价格面板</title>
+  <title>sportshistory价格面板</title>
   <link rel="stylesheet" href="/static/style.css" />
 </head>
 <body>
   <div class="page">
     <header class="header">
       <div>
-        <h1>体育历史价格面板</h1>
+        <h1>sportshistory价格面板</h1>
         <p class="subtitle">sports_history 可视化与筛选</p>
         <div class="nav-links">
           <a class="nav-link" href="/">用户数据</a>
-          <a class="nav-link active" href="/sports">体育历史</a>
+          <a class="nav-link active" href="/sports">sportshistory</a>
         </div>
       </div>
       <div class="user-controls">
         <label>
           Market 搜索
-          <input id="marketQuery" type="text" placeholder="输入关键字过滤市场" />
+          <input id="marketQuery" type="text" placeholder="输入关键字过滤事件" />
         </label>
         <label>
-          市场
+          事件
           <select id="marketSelect"></select>
         </label>
         <label>
@@ -69,7 +69,7 @@
 
     <section class="summary" id="summaryBox">
       <div class="summary-item">
-        <div class="label">市场数</div>
+        <div class="label">事件数</div>
         <div class="value" id="marketCount">-</div>
       </div>
       <div class="summary-item">

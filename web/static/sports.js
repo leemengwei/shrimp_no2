@@ -83,7 +83,7 @@ function updateSummary() {
     if (state.market && state.market.summary && state.market.summary.min_ts && state.market.summary.max_ts) {
       rangeInfo.textContent = `${formatTs(state.market.summary.min_ts)} ~ ${formatTs(state.market.summary.max_ts)}`;
     } else {
-      rangeInfo.textContent = "当前市场暂无历史点位，请切换市场或重跑历史抓取";
+      rangeInfo.textContent = "当前事件暂无历史点位，请切换事件或重跑历史抓取";
     }
   }
   if (state.market) {

@@ -28,9 +28,12 @@ DATA_API = "https://data-api.polymarket.com"
 DEFAULT_OUTPUT_DIR = "data/polymarket/user_activities"
 
 ENDPOINT_MAX_LIMITS = {
+    # Official max limits from Polymarket Data API docs.
     "positions": 500,
     "closed_positions": 50,
     "activity": 500,
+    # This script currently fetches trades via /activity?type=TRADE.
+    # So the effective limit follows /activity (500), not /trades.
     "trades": 500,
 }
 
@@ -536,6 +539,7 @@ def collect_user_bundle(
     positions_limit = ENDPOINT_MAX_LIMITS["positions"]
     closed_limit = ENDPOINT_MAX_LIMITS["closed_positions"]
     activity_limit = ENDPOINT_MAX_LIMITS["activity"]
+    trades_limit = ENDPOINT_MAX_LIMITS["trades"]
     endpoints_dir = os.path.join(user_dir, "endpoints")
     recent_enabled = recent_hours is not None and recent_hours > 0
     recent_end_ts = int(time.time()) if recent_enabled else None
@@ -648,7 +652,7 @@ def collect_user_bundle(
     trades_stats = time_window_fetch_stream(
         f"{DATA_API}/activity",
         {"user": user, "type": "TRADE", **recent_window_params},
-        activity_limit,
+        trades_limit,
         sleep_s,
         start_ts=trade_start_ts,
         end_ts=recent_end_ts,
