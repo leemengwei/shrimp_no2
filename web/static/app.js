@@ -24,6 +24,7 @@ const state = {
   },
   columnWidths: {},
   configs: {},
+  pageStateMemory: {},
 };
 
 const userSelect = document.getElementById("userSelect");
@@ -58,6 +59,66 @@ const tableHead = document.getElementById("tableHead");
 const tableBody = document.getElementById("tableBody");
 const loadingBar = document.getElementById("loadingBar");
 const loadingText = document.getElementById("loadingText");
+
+function viewMemoryKey(user, endpoint) {
+  if (!user || !endpoint) return "";
+  return `${user}::${endpoint}`;
+}
+
+function snapshotCurrentViewState() {
+  if (!state.user || !state.endpoint) return;
+  const key = viewMemoryKey(state.user, state.endpoint);
+  if (!key) return;
+  state.pageStateMemory[key] = {
+    query: queryInput.value.trim(),
+    fromTs: fromTsInput.value.trim(),
+    toTs: toTsInput.value.trim(),
+    limit: state.limit,
+    sort: state.sort,
+    activeConfig: state.activeConfig,
+  };
+}
+
+function restoreViewStateForCurrentTarget() {
+  const key = viewMemoryKey(state.user, state.endpoint);
+  if (!key) return;
+  const mem = state.pageStateMemory[key];
+  if (!mem) return;
+  state.query = mem.query || "";
+  state.fromTs = mem.fromTs || "";
+  state.toTs = mem.toTs || "";
+  state.limit = Number.isFinite(mem.limit) ? mem.limit : state.limit;
+  state.sort = mem.sort || state.sort;
+  if (mem.activeConfig) state.activeConfig = mem.activeConfig;
+  queryInput.value = state.query;
+  fromTsInput.value = state.fromTs;
+  toTsInput.value = state.toTs;
+  limitSelect.value = String(state.limit);
+  sortSelect.value = state.sort;
+}
+
+function captureLayoutState() {
+  return {
+    visibleColumns: Array.from(state.visibleColumns),
+    columnFilters: { ...state.columnFilters },
+    sortColumn: state.sortColumn,
+    sortDirection: state.sortDirection,
+    columnOrder: [...state.columnOrder],
+    columnWidths: { ...state.columnWidths },
+    forceAllColumns: state.forceAllColumns,
+  };
+}
+
+function applyLayoutState(layout) {
+  if (!layout) return;
+  state.visibleColumns = new Set(layout.visibleColumns || []);
+  state.columnFilters = { ...(layout.columnFilters || {}) };
+  state.sortColumn = layout.sortColumn || "";
+  state.sortDirection = layout.sortDirection || "asc";
+  state.columnOrder = [...(layout.columnOrder || [])];
+  state.columnWidths = { ...(layout.columnWidths || {}) };
+  state.forceAllColumns = !!layout.forceAllColumns;
+}
 
 function formatTs(ts) {
   if (!ts) return "-";
@@ -745,13 +806,17 @@ sortSelect.addEventListener("change", async (e) => {
 });
 
 userSelect.addEventListener("change", async (e) => {
+  snapshotCurrentViewState();
+  const carryLayout = captureLayoutState();
   state.user = e.target.value;
   state.offset = 0;
-  state.visibleColumns = new Set();
-  state.forceAllColumns = true;
-  state.columnFilters = {};
-  state.sortColumn = "";
-  state.sortDirection = "asc";
+  state.visibleColumns = new Set(carryLayout.visibleColumns || []);
+  state.forceAllColumns = !!carryLayout.forceAllColumns;
+  state.columnFilters = { ...(carryLayout.columnFilters || {}) };
+  state.sortColumn = carryLayout.sortColumn || "";
+  state.sortDirection = carryLayout.sortDirection || "asc";
+  state.columnOrder = [...(carryLayout.columnOrder || [])];
+  state.columnWidths = { ...(carryLayout.columnWidths || {}) };
   state.lastRows = [];
   state.lastColumns = [];
   state.lastColumnsKey = "";
@@ -763,10 +828,13 @@ userSelect.addEventListener("change", async (e) => {
   await loadMetrics();
   await loadSummary();
   await loadConfigs();
+  restoreViewStateForCurrentTarget();
+  applyLayoutState(carryLayout);
   await loadRecords();
 });
 
 endpointSelect.addEventListener("change", async (e) => {
+  snapshotCurrentViewState();
   state.endpoint = e.target.value;
   state.offset = 0;
   state.visibleColumns = new Set();
@@ -782,6 +850,7 @@ endpointSelect.addEventListener("change", async (e) => {
   columnGrid.dataset.columnsKey = "";
   clearViewForLoading("端点切换中...");
   await loadConfigs();
+  restoreViewStateForCurrentTarget();
   await loadRecords();
 });
 
@@ -868,8 +937,15 @@ async function loadConfigs() {
   state.forceAllColumns = true;
   state.columnWidths = {};
   state.columnFilters = {};
-  state.activeConfig = data.active || "默认";
+  const memoryKey = viewMemoryKey(state.user, state.endpoint);
+  const remembered = memoryKey ? state.pageStateMemory[memoryKey] : null;
+  const rememberedActive = remembered && remembered.activeConfig ? remembered.activeConfig : "";
   state.configs = data.configs || {};
+  if (rememberedActive && state.configs[rememberedActive]) {
+    state.activeConfig = rememberedActive;
+  } else {
+    state.activeConfig = data.active || "默认";
+  }
   refreshConfigSelect();
   loadColumnState();
 }

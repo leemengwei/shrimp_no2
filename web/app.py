@@ -10,6 +10,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import sqlite3
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Set, Tuple
@@ -562,6 +563,268 @@ def load_metrics(data_dir: Path, user: str) -> Dict[str, Any]:
 app = Flask(__name__)
 DATA_DIR = resolve_data_dir(DEFAULT_DATA_DIR)
 SPORTS_DIR = DEFAULT_SPORTS_DIR
+DB_PATH = DATA_DIR / "dashboard.db"
+
+
+def _db_exists() -> bool:
+    return DB_PATH.exists() and DB_PATH.is_file()
+
+
+def _db_connect() -> sqlite3.Connection:
+    conn = sqlite3.connect(DB_PATH)
+    conn.row_factory = sqlite3.Row
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS web_configs (
+            user TEXT NOT NULL,
+            endpoint TEXT NOT NULL,
+            payload_json TEXT NOT NULL,
+            updated_at INTEGER NOT NULL DEFAULT (strftime('%s', 'now')),
+            PRIMARY KEY (user, endpoint)
+        )
+        """
+    )
+    return conn
+
+
+def _db_missing_response() -> Any:
+    return (
+        jsonify(
+            {
+                "error": "database not found",
+                "message": (
+                    "SQLite database is required. Run: "
+                    "python3 src/ingest_user_activity_to_sqlite.py "
+                    "--data-dir data/polymarket/user_activities "
+                    "--db-path data/polymarket/user_activities/dashboard.db"
+                ),
+            }
+        ),
+        503,
+    )
+
+
+def _db_endpoint_base_where(endpoint: str) -> str:
+    if endpoint == "activity":
+        return "user = ? AND endpoint = ? AND COALESCE(type_upper, '') != 'YIELD'"
+    return "user = ? AND endpoint = ?"
+
+
+def _db_list_users() -> List[str]:
+    with _db_connect() as conn:
+        rows = conn.execute("SELECT DISTINCT user FROM records ORDER BY user ASC").fetchall()
+    return [str(r["user"]) for r in rows]
+
+
+def _db_resolve_user_label(user: str) -> Optional[str]:
+    with _db_connect() as conn:
+        row = conn.execute(
+            """
+            SELECT json_extract(row_json, '$.name') AS name
+            FROM records
+            WHERE user = ? AND endpoint IN ('activity', 'trades')
+              AND json_extract(row_json, '$.name') IS NOT NULL
+            ORDER BY COALESCE(ts, -1) DESC, row_hash ASC
+            LIMIT 1
+            """,
+            (user,),
+        ).fetchone()
+    if not row:
+        return None
+    val = row["name"]
+    return str(val) if val is not None else None
+
+
+def _db_list_endpoints(user: str) -> List[str]:
+    with _db_connect() as conn:
+        rows = conn.execute(
+            """
+            SELECT endpoint
+            FROM (
+                SELECT endpoint FROM records WHERE user = ?
+                UNION
+                SELECT endpoint FROM endpoint_columns WHERE user = ?
+                UNION
+                SELECT endpoint FROM ingest_state WHERE user = ?
+            )
+            ORDER BY endpoint ASC
+            """,
+            (user, user, user),
+        ).fetchall()
+    return [str(r["endpoint"]) for r in rows]
+
+
+def _db_endpoint_summary(user: str, endpoint: str) -> Dict[str, Any]:
+    where_sql = _db_endpoint_base_where(endpoint)
+    with _db_connect() as conn:
+        row = conn.execute(
+            f"""
+            SELECT
+              COUNT(1) AS total,
+              MIN(ts) AS min_ts,
+              MAX(ts) AS max_ts
+            FROM records
+            WHERE {where_sql}
+            """,
+            (user, endpoint),
+        ).fetchone()
+    return {
+        "total": int(row["total"]) if row and row["total"] is not None else 0,
+        "min_ts": int(row["min_ts"]) if row and row["min_ts"] is not None else None,
+        "max_ts": int(row["max_ts"]) if row and row["max_ts"] is not None else None,
+        "latest_ts": int(row["max_ts"]) if row and row["max_ts"] is not None else None,
+    }
+
+
+def _db_load_latest_json(user: str, endpoint: str) -> Optional[Any]:
+    with _db_connect() as conn:
+        row = conn.execute(
+            """
+            SELECT row_json
+            FROM records
+            WHERE user = ? AND endpoint = ?
+            ORDER BY COALESCE(ts, -1) DESC, rowid DESC
+            LIMIT 1
+            """,
+            (user, endpoint),
+        ).fetchone()
+    if not row:
+        return None
+    try:
+        return json.loads(row["row_json"])
+    except (TypeError, json.JSONDecodeError):
+        return None
+
+
+def _build_db_filters(
+    endpoint: str,
+    query: str,
+    from_ts_i: Optional[int],
+    to_ts_i: Optional[int],
+    column_filters: Optional[Dict[str, Any]],
+) -> Tuple[List[str], List[Any]]:
+    where = ["user = ?", "endpoint = ?"]
+    params: List[Any] = []
+    if endpoint == "activity":
+        where.append("COALESCE(type_upper, '') != 'YIELD'")
+    if query:
+        where.append("row_text LIKE ?")
+        params.append(f"%{query.lower()}%")
+    if from_ts_i is not None:
+        where.append("(ts IS NULL OR ts >= ?)")
+        params.append(from_ts_i)
+    if to_ts_i is not None:
+        where.append("(ts IS NULL OR ts <= ?)")
+        params.append(to_ts_i)
+    if column_filters:
+        for key, raw in column_filters.items():
+            if not raw:
+                continue
+            tokens = [part.strip().lower() for part in str(raw).split(",") if part.strip()]
+            if not tokens:
+                continue
+            key_clause = []
+            json_path = f"$.{key}"
+            for token in tokens:
+                key_clause.append("LOWER(COALESCE(CAST(json_extract(row_json, ?) AS TEXT), '')) LIKE ?")
+                params.extend([json_path, f"%{token}%"])
+            where.append(f"({' OR '.join(key_clause)})")
+    return where, params
+
+
+def _load_records_from_db(
+    user: str,
+    endpoint: str,
+    query: str,
+    from_ts_i: Optional[int],
+    to_ts_i: Optional[int],
+    sort_order: str,
+    limit: int,
+    offset: int,
+    column_filters: Optional[Dict[str, Any]],
+) -> Dict[str, Any]:
+    with _db_connect() as conn:
+        where, params = _build_db_filters(endpoint, query, from_ts_i, to_ts_i, column_filters)
+        base_where_sql = " AND ".join(where)
+        base_params = [user, endpoint, *params]
+
+        total_row = conn.execute(
+            f"SELECT COUNT(1) AS total FROM records WHERE {base_where_sql}",
+            base_params,
+        ).fetchone()
+        total = int(total_row["total"]) if total_row else 0
+
+        if sort_order == "asc":
+            order_sql = "ORDER BY COALESCE(ts, -1) ASC, row_hash ASC"
+        else:
+            order_sql = "ORDER BY COALESCE(ts, -1) DESC, row_hash ASC"
+        sql = (
+            f"SELECT row_json FROM records WHERE {base_where_sql} "
+            f"{order_sql} LIMIT ? OFFSET ?"
+        )
+        rows_db = conn.execute(sql, [*base_params, limit, offset]).fetchall()
+
+        rows: List[Dict[str, Any]] = []
+        for r in rows_db:
+            try:
+                decoded = json.loads(r["row_json"])
+            except (TypeError, json.JSONDecodeError):
+                continue
+            if isinstance(decoded, dict):
+                rows.append(decoded)
+
+        col_rows = conn.execute(
+            """
+            SELECT column_name
+            FROM endpoint_columns
+            WHERE user = ? AND endpoint = ?
+            ORDER BY ord ASC
+            """,
+            (user, endpoint),
+        ).fetchall()
+        all_columns = [str(r["column_name"]) for r in col_rows]
+        return {"rows": rows, "total": total, "all_columns": all_columns}
+
+
+def _db_get_configs(user: str, endpoint: str) -> Dict[str, Any]:
+    with _db_connect() as conn:
+        row = conn.execute(
+            "SELECT payload_json FROM web_configs WHERE user = ? AND endpoint = ?",
+            (user, endpoint),
+        ).fetchone()
+    if not row:
+        return {"active": "默认", "configs": {}}
+    try:
+        payload = json.loads(row["payload_json"])
+    except (TypeError, json.JSONDecodeError):
+        return {"active": "默认", "configs": {}}
+    if not isinstance(payload, dict):
+        return {"active": "默认", "configs": {}}
+    return {
+        "active": payload.get("active") or "默认",
+        "configs": payload.get("configs") if isinstance(payload.get("configs"), dict) else {},
+    }
+
+
+def _db_save_configs(user: str, endpoint: str, payload: Dict[str, Any]) -> None:
+    normalized = {
+        "active": payload.get("active") or "默认",
+        "configs": payload.get("configs") if isinstance(payload.get("configs"), dict) else {},
+    }
+    with _db_connect() as conn:
+        conn.execute(
+            """
+            INSERT INTO web_configs(user, endpoint, payload_json, updated_at)
+            VALUES (?, ?, ?, strftime('%s', 'now'))
+            ON CONFLICT(user, endpoint) DO UPDATE SET
+                payload_json = excluded.payload_json,
+                updated_at = excluded.updated_at
+            """,
+            (user, endpoint, json.dumps(normalized, ensure_ascii=False)),
+        )
+        conn.commit()
+
+
 def _stable_row_sort_key(row: Dict[str, Any]) -> Tuple[Any, ...]:
     return _activity_row_sort_key(row)
 
@@ -584,81 +847,91 @@ def sports_index() -> str:
 
 @app.route("/api/users")
 def api_users() -> Any:
-    users = list_users(DATA_DIR)
+    if not _db_exists():
+        return _db_missing_response()
+    users = _db_list_users()
     detailed = []
     for user in users:
-        detailed.append({"id": user, "label": resolve_user_label(DATA_DIR, user)})
+        detailed.append({"id": user, "label": _db_resolve_user_label(user)})
     return jsonify({"users": detailed})
 
 
 @app.route("/api/user/<user>/manifest")
 def api_manifest(user: str) -> Any:
-    manifest = load_manifest(DATA_DIR, user)
-    return jsonify(manifest)
+    if not _db_exists():
+        return _db_missing_response()
+    endpoints = _db_list_endpoints(user)
+    endpoint_info = {ep: _db_endpoint_summary(user, ep) for ep in endpoints}
+    return jsonify(
+        {
+            "user": user,
+            "generated_at": None,
+            "bundle": None,
+            "endpoints": endpoint_info,
+        }
+    )
 
 
 @app.route("/api/user/<user>/endpoints")
 def api_endpoints(user: str) -> Any:
-    manifest = load_manifest(DATA_DIR, user)
-    endpoints = []
-    if isinstance(manifest, dict) and isinstance(manifest.get("endpoints"), dict):
-        endpoints = sorted(manifest["endpoints"].keys())
-    else:
-        base = DATA_DIR / user / "endpoints"
-        if base.exists():
-            guessed: Set[str] = set()
-            for p in base.iterdir():
-                if p.is_dir():
-                    guessed.add(p.name)
-                elif p.is_file() and p.suffix == ".json":
-                    guessed.add(p.stem)
-            endpoints = sorted(guessed)
+    if not _db_exists():
+        return _db_missing_response()
+    endpoints = _db_list_endpoints(user)
     return jsonify({"endpoints": endpoints})
 
 
 @app.route("/api/user/<user>/summary")
 def api_summary(user: str) -> Any:
-    manifest = load_manifest(DATA_DIR, user)
-    bundle = load_user_bundle(DATA_DIR, user)
+    if not _db_exists():
+        return _db_missing_response()
+    endpoints = _db_list_endpoints(user)
+    endpoint_info = {ep: _db_endpoint_summary(user, ep) for ep in endpoints}
     summary = {
         "user": user,
-        "generated_at": manifest.get("generated_at"),
-        "fetched_at": bundle.get("fetched_at") or manifest.get("fetched_at"),
-        "endpoints": manifest.get("endpoints", {}),
+        "generated_at": None,
+        "fetched_at": None,
+        "endpoints": endpoint_info,
     }
     return jsonify(summary)
 
 
 @app.route("/api/user/<user>/metrics")
 def api_metrics(user: str) -> Any:
-    return jsonify(load_metrics(DATA_DIR, user))
+    if not _db_exists():
+        return _db_missing_response()
+    return jsonify(
+        {
+            "generated_at": None,
+            "fetched_at": None,
+            "positions_value": _db_load_latest_json(user, "positions_value"),
+            "traded_markets": _db_load_latest_json(user, "traded_markets"),
+        }
+    )
 
 
 @app.route("/api/user/<user>/endpoint_summary")
 def api_endpoint_summary(user: str) -> Any:
+    if not _db_exists():
+        return _db_missing_response()
     endpoint = request.args.get("endpoint", "activity")
-    manifest = load_manifest(DATA_DIR, user)
-    endpoints = manifest.get("endpoints", {}) if isinstance(manifest, dict) else {}
-    info = endpoints.get(endpoint) if isinstance(endpoints, dict) else None
-    if isinstance(info, dict):
-        return jsonify(info)
-
-    files = resolve_endpoint_files(DATA_DIR, user, endpoint)
-    rows_iter = read_endpoint_pages(files)
-    summary = summarize_rows(rows_iter)
+    summary = _db_endpoint_summary(user, endpoint)
     summary["endpoint"] = endpoint
     return jsonify(summary)
 
 
 @app.route("/api/user/<user>/configs", methods=["GET", "POST"])
 def api_user_configs(user: str) -> Any:
+    if not _db_exists():
+        return _db_missing_response()
     if request.method == "GET":
         endpoint = request.args.get("endpoint", "")
-        configs = load_web_configs(DATA_DIR, user)
         if endpoint:
-            payload = configs.get(endpoint, {"active": "默认", "configs": {}})
-            return jsonify(payload)
-        return jsonify(configs)
+            return jsonify(_db_get_configs(user, endpoint))
+        endpoints = _db_list_endpoints(user)
+        payload = {}
+        for ep in endpoints:
+            payload[ep] = _db_get_configs(user, ep)
+        return jsonify(payload)
 
     data = request.get_json(silent=True) or {}
     endpoint = data.get("endpoint")
@@ -669,8 +942,7 @@ def api_user_configs(user: str) -> Any:
         if action != "delete":
             return jsonify({"error": "invalid payload"}), 400
 
-    configs = load_web_configs(DATA_DIR, user)
-    entry = configs.get(endpoint, {"active": "默认", "configs": {}})
+    entry = _db_get_configs(user, endpoint)
     entry_configs = entry.get("configs", {})
 
     if action == "delete":
@@ -679,21 +951,21 @@ def api_user_configs(user: str) -> Any:
             del entry_configs[name]
         entry["configs"] = entry_configs
         entry["active"] = data.get("active", "默认")
-        configs[endpoint] = entry
-        save_web_configs(DATA_DIR, user, configs)
+        _db_save_configs(user, endpoint, entry)
         return jsonify({"ok": True, "active": entry["active"]})
 
     entry["active"] = active
     name = config.get("name") or active or "默认"
     entry_configs[name] = config
     entry["configs"] = entry_configs
-    configs[endpoint] = entry
-    save_web_configs(DATA_DIR, user, configs)
+    _db_save_configs(user, endpoint, entry)
     return jsonify({"ok": True, "active": active, "name": name})
 
 
 @app.route("/api/user/<user>/records")
 def api_records(user: str) -> Any:
+    if not _db_exists():
+        return _db_missing_response()
     endpoint = request.args.get("endpoint", "activity")
     query = request.args.get("query", "").strip()
     from_ts = request.args.get("from_ts")
@@ -708,10 +980,6 @@ def api_records(user: str) -> Any:
     to_ts_i = int(to_ts) if to_ts and to_ts.isdigit() else None
     limit = min(limit, 2000)
 
-    files = resolve_endpoint_files(DATA_DIR, user, endpoint)
-    if not files:
-        return jsonify({"rows": [], "total": 0, "endpoint": endpoint})
-
     column_filters = None
     if filters_raw:
         try:
@@ -721,22 +989,21 @@ def api_records(user: str) -> Any:
         except json.JSONDecodeError:
             column_filters = None
 
-    rows_iter = read_endpoint_pages(files)
-    if endpoint == "activity":
-        def _filter_yield(rows: Iterable[Any]) -> Iterable[Any]:
-            for row in rows:
-                if isinstance(row, dict) and str(row.get("type", "")).upper() == "YIELD":
-                    continue
-                yield row
-        rows_iter = _filter_yield(rows_iter)
+    db_payload = _load_records_from_db(
+        user=user,
+        endpoint=endpoint,
+        query=query,
+        from_ts_i=from_ts_i,
+        to_ts_i=to_ts_i,
+        sort_order=sort_order,
+        limit=limit,
+        offset=offset,
+        column_filters=column_filters,
+    )
+    page = db_payload["rows"]
+    total = db_payload["total"]
+    all_columns = db_payload["all_columns"]
 
-    filtered, all_columns = filter_rows(rows_iter, query, from_ts_i, to_ts_i, column_filters)
-
-    if sort_order == "asc":
-        filtered.sort(key=_stable_row_sort_key)
-    elif sort_order == "desc":
-        filtered.sort(key=_stable_row_sort_key_desc)
-    page, total = paginate(filtered, limit, offset)
     columns: List[str] = []
     if view == "compact":
         page, columns = apply_compact_view(endpoint, page)
