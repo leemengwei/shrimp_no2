@@ -2,11 +2,7 @@
 """High-throughput real-time sports market price collector for Polymarket.
 
 Example:
-  python3 src/collect_stream_sports_prices.py \
-    --output data/realtime/sports_ticks.jsonl \
-    --snapshot-output data/realtime/sports_latest_snapshot.json \
-    --batch-size 350 \
-    --max-connections 10
+  python3 src/collect_stream_sports_prices.py
 """
 
 from __future__ import annotations
@@ -27,6 +23,8 @@ from typing import Any, Dict, Iterable, List, Optional, Sequence, Set
 GAMMA_API = "https://gamma-api.polymarket.com"
 DEFAULT_WS_URL = "wss://ws-subscriptions-clob.polymarket.com/ws/market"
 DEFAULT_USER_AGENT = "polymarket-research-realtime/1.0"
+DEFAULT_OUTPUT_PATH = "data/realtime/sports_ticks.jsonl"
+DEFAULT_SNAPSHOT_OUTPUT_PATH = "data/realtime/sports_latest_snapshot.json"
 
 
 @dataclass
@@ -34,6 +32,9 @@ class CollectorStats:
     messages: int = 0
     events: int = 0
     reconnects: int = 0
+    receive_timeouts: int = 0
+    resubscribe_attempts: int = 0
+    resubscribe_successes: int = 0
 
 
 def parse_args() -> argparse.Namespace:
@@ -42,18 +43,8 @@ def parse_args() -> argparse.Namespace:
             "Collect high-frequency real-time price updates for active Polymarket sports markets."
         )
     )
-    parser.add_argument(
-        "--output",
-        default="data/realtime/sports_ticks.jsonl",
-        help="Output JSONL file path for tick-level raw events",
-    )
-    parser.add_argument(
-        "--snapshot-output",
-        default="data/realtime/sports_latest_snapshot.json",
-        help="Output JSON snapshot path for latest price per asset id",
-    )
-    parser.add_argument("--batch-size", type=int, default=400, help="Asset ids per websocket connection")
-    parser.add_argument("--max-connections", type=int, default=8, help="Max concurrent websocket connections")
+    parser.add_argument("--batch-size", type=int, default=350, help="Asset ids per websocket connection")
+    parser.add_argument("--max-connections", type=int, default=10, help="Max concurrent websocket connections")
     parser.add_argument(
         "--snapshot-interval", type=float, default=5.0, help="Seconds between snapshot file updates"
     )
@@ -76,6 +67,18 @@ def parse_args() -> argparse.Namespace:
         "--disable-ping",
         action="store_true",
         help="Disable websocket ping interval (useful for some proxy setups)",
+    )
+    parser.add_argument(
+        "--heartbeat-timeout",
+        type=float,
+        default=25.0,
+        help="Reconnect when no message is received for this many seconds",
+    )
+    parser.add_argument(
+        "--resubscribe-log-every",
+        type=int,
+        default=10,
+        help="Emit an extra resubscribe summary log every N successful subscriptions",
     )
     return parser.parse_args()
 
@@ -265,6 +268,8 @@ async def stream_batch(
     stop_event: asyncio.Event,
     stats: CollectorStats,
     disable_ping: bool,
+    heartbeat_timeout_s: float,
+    resubscribe_log_every: int,
 ) -> None:
     import websockets
 
@@ -277,6 +282,7 @@ async def stream_batch(
     while not stop_event.is_set():
         try:
             ping_interval = None if disable_ping else 20
+            stats.resubscribe_attempts += 1
             async with websockets.connect(
                 websocket_url,
                 ping_interval=ping_interval,
@@ -284,11 +290,24 @@ async def stream_batch(
                 close_timeout=5,
             ) as ws:
                 await ws.send(json.dumps(subscribe_payload, ensure_ascii=False))
+                stats.resubscribe_successes += 1
                 backoff = 1.0
-                log(f"[ws {connection_id}] subscribed assets={len(asset_ids)} sample={asset_ids[:2]}")
+                log(
+                    f"[ws {connection_id}] subscribed assets={len(asset_ids)} sample={asset_ids[:2]} "
+                    f"resubscribe={stats.resubscribe_successes}/{stats.resubscribe_attempts}"
+                )
+                if (
+                    resubscribe_log_every > 0
+                    and stats.resubscribe_successes % resubscribe_log_every == 0
+                ):
+                    log(
+                        "[resubscribe] "
+                        f"success={stats.resubscribe_successes} attempts={stats.resubscribe_attempts} "
+                        f"reconnects={stats.reconnects} receive_timeouts={stats.receive_timeouts}"
+                    )
 
                 while not stop_event.is_set():
-                    raw_msg = await asyncio.wait_for(ws.recv(), timeout=30)
+                    raw_msg = await asyncio.wait_for(ws.recv(), timeout=heartbeat_timeout_s)
                     stats.messages += 1
                     with contextlib.suppress(json.JSONDecodeError):
                         parsed = json.loads(raw_msg)
@@ -297,8 +316,12 @@ async def stream_batch(
                         for event in events:
                             await queue.put(event)
         except asyncio.TimeoutError:
+            stats.receive_timeouts += 1
             stats.reconnects += 1
-            log(f"[ws {connection_id}] timeout, reconnecting")
+            log(
+                f"[ws {connection_id}] heartbeat_timeout={heartbeat_timeout_s}s, reconnecting "
+                f"timeouts={stats.receive_timeouts} reconnects={stats.reconnects}"
+            )
         except Exception as exc:  # noqa: BLE001
             stats.reconnects += 1
             log(f"[ws {connection_id}] error={exc}, reconnecting")
@@ -387,7 +410,8 @@ async def metrics_loop(stats: CollectorStats, interval_s: float, stop_event: asy
             "[metrics] "
             f"messages_total={stats.messages} messages_rate={delta_messages / interval_s:.1f}/s "
             f"events_total={stats.events} events_rate={delta_events / interval_s:.1f}/s "
-            f"reconnects={stats.reconnects}"
+            f"reconnects={stats.reconnects} receive_timeouts={stats.receive_timeouts} "
+            f"resubscribe={stats.resubscribe_successes}/{stats.resubscribe_attempts}"
         )
 
 
@@ -438,8 +462,8 @@ async def async_main(args: argparse.Namespace) -> None:
     writer_task = asyncio.create_task(
         writer_loop(
             queue=queue,
-            out_path=Path(args.output),
-            snapshot_path=Path(args.snapshot_output),
+            out_path=Path(DEFAULT_OUTPUT_PATH),
+            snapshot_path=Path(DEFAULT_SNAPSHOT_OUTPUT_PATH),
             snapshot_interval=max(1.0, args.snapshot_interval),
             flush_interval=max(0.2, args.flush_interval),
             flush_lines=max(1, args.flush_lines),
@@ -458,6 +482,8 @@ async def async_main(args: argparse.Namespace) -> None:
                 stop_event=stop_event,
                 stats=stats,
                 disable_ping=args.disable_ping,
+                heartbeat_timeout_s=max(5.0, args.heartbeat_timeout),
+                resubscribe_log_every=max(0, args.resubscribe_log_every),
             )
         )
         for idx, batch in enumerate(batches, start=1)

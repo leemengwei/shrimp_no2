@@ -332,6 +332,8 @@ function formatShares(val) {
 
 function estimateSharesSummaryForPage(rows) {
   const cumulative = new Map();
+  const cumulativePosition = new Map();
+  const cumulativeCost = new Map();
   const knownOutcomes = new Map();
   const conditionPrefix = (conditionId) => `${conditionId}::`;
   const makeKey = (conditionId, outcomeKey) => `${conditionId}::${outcomeKey}`;
@@ -381,6 +383,32 @@ function estimateSharesSummaryForPage(rows) {
         const outcome = outcomeInfoFromRow(row);
         const key = makeKey(conditionId, outcome.key);
         cumulative.set(key, (cumulative.get(key) || 0) + delta);
+        const price = toNumber(row.price);
+        if (price !== null) {
+          let pos = cumulativePosition.get(key) || 0;
+          let cost = cumulativeCost.get(key) || 0;
+          if (pos === 0 || (pos > 0 && delta > 0) || (pos < 0 && delta < 0)) {
+            pos += delta;
+            cost += delta * price;
+          } else {
+            const absPos = Math.abs(pos);
+            const absDelta = Math.abs(delta);
+            if (absDelta < absPos) {
+              const avg = cost / pos;
+              pos += delta;
+              cost = avg * pos;
+            } else if (absDelta === absPos) {
+              pos = 0;
+              cost = 0;
+            } else {
+              const remain = pos + delta;
+              pos = remain;
+              cost = remain * price;
+            }
+          }
+          cumulativePosition.set(key, pos);
+          cumulativeCost.set(key, cost);
+        }
       }
     } else if (actionType === "SPLIT" || actionType === "MERGE") {
       const delta = actionType === "SPLIT" ? size : -size;
@@ -388,16 +416,58 @@ function estimateSharesSummaryForPage(rows) {
       if (conditionKnown && conditionKnown.size > 0) {
         Array.from(conditionKnown.keys()).forEach((outcomeKey) => {
           const key = makeKey(conditionId, outcomeKey);
+          const prevPos = cumulativePosition.get(key) || 0;
+          const prevCost = cumulativeCost.get(key) || 0;
+          const nextPos = prevPos + delta;
           cumulative.set(key, (cumulative.get(key) || 0) + delta);
+          if (prevPos === 0) {
+            if (nextPos === 0) {
+              cumulativePosition.set(key, 0);
+              cumulativeCost.set(key, 0);
+            } else {
+              cumulativePosition.set(key, nextPos);
+              // No trade price for split/merge-only position; keep unknown cost at 0.
+              cumulativeCost.set(key, 0);
+            }
+          } else {
+            if (nextPos === 0) {
+              cumulativePosition.set(key, 0);
+              cumulativeCost.set(key, 0);
+            } else {
+              const avg = prevCost / prevPos;
+              cumulativePosition.set(key, nextPos);
+              cumulativeCost.set(key, avg * nextPos);
+            }
+          }
         });
       } else {
         const key = makeKey(conditionId, "all:unknown|label:ALL");
+        const prevPos = cumulativePosition.get(key) || 0;
+        const prevCost = cumulativeCost.get(key) || 0;
+        const nextPos = prevPos + delta;
         cumulative.set(key, (cumulative.get(key) || 0) + delta);
+        if (prevPos === 0) {
+          cumulativePosition.set(key, nextPos);
+          cumulativeCost.set(key, 0);
+        } else if (nextPos === 0) {
+          cumulativePosition.set(key, 0);
+          cumulativeCost.set(key, 0);
+        } else {
+          const avg = prevCost / prevPos;
+          cumulativePosition.set(key, nextPos);
+          cumulativeCost.set(key, avg * nextPos);
+        }
       }
     } else if (actionType === "REDEEM") {
       const prefix = conditionPrefix(conditionId);
       Array.from(cumulative.keys()).forEach((k) => {
         if (k.startsWith(prefix)) cumulative.set(k, 0);
+      });
+      Array.from(cumulativePosition.keys()).forEach((k) => {
+        if (k.startsWith(prefix)) {
+          cumulativePosition.set(k, 0);
+          cumulativeCost.set(k, 0);
+        }
       });
     } else {
       continue;
@@ -405,6 +475,7 @@ function estimateSharesSummaryForPage(rows) {
 
     const prefix = conditionPrefix(conditionId);
     const pieces = [];
+    const avgPieces = [];
     const conditionKnown = knownOutcomes.get(conditionId) || new Map();
     Array.from(conditionKnown.keys())
       .sort((a, b) => a.localeCompare(b))
@@ -412,6 +483,13 @@ function estimateSharesSummaryForPage(rows) {
         const v = cumulative.get(makeKey(conditionId, outcomeKey)) || 0;
         const label = conditionKnown.get(outcomeKey) || outcomeKey.split("|label:")[1] || "ALL";
         pieces.push(`${label}:${formatShares(v)}`);
+        const key = makeKey(conditionId, outcomeKey);
+        const pos = cumulativePosition.get(key) || 0;
+        const cost = cumulativeCost.get(key) || 0;
+        if (pos !== 0 && cost !== 0) {
+          const avg = Math.abs((cumulativeCost.get(key) || 0) / pos);
+          avgPieces.push(`${label}:${avg.toFixed(4)}`);
+        }
       });
     Array.from(cumulative.entries())
       .filter(([k]) => k.startsWith(prefix))
@@ -421,8 +499,15 @@ function estimateSharesSummaryForPage(rows) {
         if (conditionKnown.has(outcomeKey)) return;
         const label = outcomeKey.split("|label:")[1] || "ALL";
         pieces.push(`${label}:${formatShares(v)}`);
+        const pos = cumulativePosition.get(k) || 0;
+        const cost = cumulativeCost.get(k) || 0;
+        if (pos !== 0 && cost !== 0) {
+          const avg = Math.abs((cumulativeCost.get(k) || 0) / pos);
+          avgPieces.push(`${label}:${avg.toFixed(4)}`);
+        }
       });
     row.shares_summary = pieces.join(", ");
+    row.shares_summary_avg = avgPieces.length > 0 ? `均价 ${avgPieces.join(", ")}` : "";
   }
 }
 
@@ -496,6 +581,17 @@ function buildTable(rows, columnsOverride) {
         img.alt = col;
         img.className = "thumb";
         td.appendChild(img);
+      } else if (col === "shares_summary") {
+        const main = document.createElement("div");
+        main.textContent = formatCellValue(col, val);
+        td.appendChild(main);
+        const avgText = row.shares_summary_avg || "";
+        if (avgText) {
+          const sub = document.createElement("div");
+          sub.className = "shares-summary-sub";
+          sub.textContent = avgText;
+          td.appendChild(sub);
+        }
       } else {
         td.textContent = formatCellValue(col, val);
       }

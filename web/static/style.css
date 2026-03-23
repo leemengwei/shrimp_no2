@@ -393,6 +393,13 @@ tbody tr:hover {
   background: rgba(201, 138, 45, 0.14);
 }
 
+.shares-summary-sub {
+  margin-top: 2px;
+  font-size: 11px;
+  color: var(--muted);
+  line-height: 1.2;
+}
+
 .thumb {
   width: 28px;
   height: 28px;
