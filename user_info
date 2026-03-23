@@ -1,5 +1,5 @@
 
 user_id = '0x2005d16a84ceefa912d4e380cd32e7ff827875ea'  # RN1  # 始终自动交易，极大量，基本持续盈利
 user_id = '0xf0729143cbf9ade46743017ec4e1832a3564cee7'  # selector  # 已经改名为：RIPTS了，该用户收益出现大幅回撤，可以说是策略失败了
-user_id = '0x1ea6aab09d4b9b504fa24f961f0c6709efb72f5d'  # lmw   # 这是我
+user_id = '0x1ea6aab09d4b9b504fa24f961f0c6709efb72f5d'  # lmw   # 这是我lee0708
 
