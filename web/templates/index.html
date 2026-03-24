@@ -4,7 +4,7 @@
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>虾米数据看板</title>
-  <link rel="stylesheet" href="/static/style.css" />
+  <link rel="stylesheet" href="/static/style.css?v=20260324a" />
 </head>
 <body>
   <div class="page">
@@ -51,6 +51,11 @@
           <option value="asc">时间正序</option>
         </select>
       </label>
+      <label>
+        CLOB最大点数
+        <input id="eventPriceMaxPoints" type="number" min="1" max="1000000" step="100" value="250" />
+      </label>
+      <button id="eventPriceApplyBtn" class="ghost">刷新CLOB图</button>
     </section>
 
     <section class="summary" id="summaryBox">
@@ -85,6 +90,14 @@
       <div class="summary-item">
         <div class="label">抓取时间</div>
         <div class="value" id="fetchedAt">-</div>
+      </div>
+    </section>
+
+    <section class="chart-section" id="eventPriceSection">
+      <div class="chart-card">
+        <div class="chart-title" id="eventPriceTitle">事件价格历史</div>
+        <div class="chart-meta" id="eventPriceMeta">请先筛选到单一事件</div>
+        <div id="eventPriceChart"></div>
       </div>
     </section>
 
@@ -139,6 +152,7 @@
     </section>
   </div>
 
-  <script src="/static/app.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/echarts@5/dist/echarts.min.js"></script>
+  <script src="/static/app.js?v=20260324a"></script>
 </body>
 </html>

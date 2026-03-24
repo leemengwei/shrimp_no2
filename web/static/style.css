@@ -199,6 +199,32 @@ button.ghost {
   margin-bottom: 8px;
 }
 
+.chart-meta {
+  color: var(--muted);
+  font-size: 11px;
+  margin-bottom: 8px;
+}
+
+.chart-controls {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  flex-wrap: wrap;
+  margin-bottom: 8px;
+}
+
+.chart-controls input {
+  width: 120px;
+}
+
+#eventPriceChart {
+  width: 100%;
+  height: 320px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: #fff8ea;
+}
+
 .raw-cell {
   max-width: 420px;
   white-space: nowrap;
