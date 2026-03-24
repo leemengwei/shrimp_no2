@@ -7,6 +7,8 @@ const state = {
   query: "",
   fromTs: "",
   toTs: "",
+  eventPriceMaxPoints: 250,
+  eventPriceRef: null,
   view: "full",
   sort: "desc",
   visibleColumns: new Set(),
@@ -59,6 +61,13 @@ const tableHead = document.getElementById("tableHead");
 const tableBody = document.getElementById("tableBody");
 const loadingBar = document.getElementById("loadingBar");
 const loadingText = document.getElementById("loadingText");
+const eventPriceTitle = document.getElementById("eventPriceTitle");
+const eventPriceMeta = document.getElementById("eventPriceMeta");
+const eventPriceChart = document.getElementById("eventPriceChart");
+const eventPriceMaxPointsInput = document.getElementById("eventPriceMaxPoints");
+const eventPriceApplyBtn = document.getElementById("eventPriceApplyBtn");
+let eventPriceChartInstance = null;
+let eventPriceLineSeriesCache = [];
 
 function viewMemoryKey(user, endpoint) {
   if (!user || !endpoint) return "";
@@ -75,6 +84,7 @@ function snapshotCurrentViewState() {
     toTs: toTsInput.value.trim(),
     limit: state.limit,
     sort: state.sort,
+    eventPriceMaxPoints: state.eventPriceMaxPoints,
     activeConfig: state.activeConfig,
   };
 }
@@ -89,12 +99,18 @@ function restoreViewStateForCurrentTarget() {
   state.toTs = mem.toTs || "";
   state.limit = Number.isFinite(mem.limit) ? mem.limit : state.limit;
   state.sort = mem.sort || state.sort;
+  state.eventPriceMaxPoints = Number.isFinite(mem.eventPriceMaxPoints)
+    ? mem.eventPriceMaxPoints
+    : state.eventPriceMaxPoints;
   if (mem.activeConfig) state.activeConfig = mem.activeConfig;
   queryInput.value = state.query;
   fromTsInput.value = state.fromTs;
   toTsInput.value = state.toTs;
   limitSelect.value = String(state.limit);
   sortSelect.value = state.sort;
+  if (eventPriceMaxPointsInput) {
+    eventPriceMaxPointsInput.value = String(state.eventPriceMaxPoints);
+  }
 }
 
 function captureLayoutState() {
@@ -134,6 +150,360 @@ function formatNumber(val, digits = 2) {
   });
 }
 
+function toFiniteNumber(val) {
+  if (typeof val === "number" && Number.isFinite(val)) return val;
+  if (typeof val === "string" && val.trim() !== "") {
+    const n = Number(val);
+    return Number.isFinite(n) ? n : null;
+  }
+  return null;
+}
+
+function readRowTs(row) {
+  const keys = ["timestamp", "ts", "time", "createdAt", "created_at", "resolvedAt"];
+  for (const k of keys) {
+    const n = toFiniteNumber(row[k]);
+    if (n !== null) return n;
+  }
+  return null;
+}
+
+function readNearestPrice(seriesData, tsMs) {
+  if (!Array.isArray(seriesData) || seriesData.length === 0) return null;
+  let lo = 0;
+  let hi = seriesData.length - 1;
+  while (lo < hi) {
+    const mid = Math.floor((lo + hi) / 2);
+    if (seriesData[mid][0] < tsMs) lo = mid + 1;
+    else hi = mid;
+  }
+  const i = lo;
+  const cand = [];
+  if (i >= 0 && i < seriesData.length) cand.push(seriesData[i]);
+  if (i - 1 >= 0) cand.push(seriesData[i - 1]);
+  if (cand.length === 0) return null;
+  cand.sort((a, b) => Math.abs(a[0] - tsMs) - Math.abs(b[0] - tsMs));
+  return cand[0][1];
+}
+
+function getEventPriceMaxPoints() {
+  const raw = eventPriceMaxPointsInput ? Number(eventPriceMaxPointsInput.value) : state.eventPriceMaxPoints;
+  const n = Number.isFinite(raw) ? Math.trunc(raw) : state.eventPriceMaxPoints;
+  const clamped = Math.max(1, Math.min(1000000, n));
+  state.eventPriceMaxPoints = clamped;
+  if (eventPriceMaxPointsInput) eventPriceMaxPointsInput.value = String(clamped);
+  return clamped;
+}
+
+function ensureEventChart() {
+  if (!eventPriceChart) return null;
+  if (typeof window.echarts === "undefined") return null;
+  if (!eventPriceChartInstance) {
+    eventPriceChartInstance = window.echarts.init(eventPriceChart);
+  }
+  return eventPriceChartInstance;
+}
+
+function drawEventPriceSeries(seriesList, tradeMarkers = []) {
+  const chart = ensureEventChart();
+  if (!chart) return;
+  const normalized = Array.isArray(seriesList) ? seriesList : [];
+  const tokenAliasMap = new Map();
+  let tokenIdx = 1;
+  for (const item of normalized) {
+    const tokenId = String(item?.token_id || "").trim();
+    if (!tokenId) continue;
+    if (!tokenAliasMap.has(tokenId)) {
+      tokenAliasMap.set(tokenId, `token${tokenIdx}`);
+      tokenIdx += 1;
+    }
+  }
+  const sourceStyleMap = {
+    clob: {
+      color: "#1f77b4",
+      symbolSize: 5,
+      symbol: "circle",
+      z: 12,
+      zlevel: 1,
+      itemStyle: {
+        color: "rgba(31,119,180,0.08)",
+        borderColor: "#1f77b4",
+        borderWidth: 1,
+      },
+    },
+    trades: {
+      color: "#ff3b30",
+      symbolSize: 10,
+      symbol: "circle",
+      z: 6,
+      zlevel: 1,
+      itemStyle: {
+        color: "rgba(255,59,48,0.55)",
+        borderColor: "#ff3b30",
+        borderWidth: 1.5,
+      },
+    },
+  };
+  const pointSeries = normalized.map((item, idx) => {
+    const points = Array.isArray(item.points) ? item.points : [];
+    const data = points
+      .filter((p) => typeof p.ts === "number" && typeof p.price === "number")
+      .map((p) => [p.ts * 1000, p.price]);
+    const source = String(item.source || "").trim().toLowerCase();
+    const style = sourceStyleMap[source] || {
+      color: "#7f8c8d",
+      symbolSize: 6,
+      symbol: "circle",
+      z: 8,
+      zlevel: 1,
+      itemStyle: { color: "rgba(127,140,141,0.45)", borderColor: "#7f8c8d", borderWidth: 1 },
+    };
+    const tokenId = String(item.token_id || "").trim();
+    const tokenAlias = tokenAliasMap.get(tokenId) || `token${idx + 1}`;
+    const displayName = `${tokenAlias}(${source || "unknown"})`;
+    return {
+      name: displayName,
+      source,
+      type: "scatter",
+      symbol: style.symbol,
+      symbolSize: style.symbolSize,
+      itemStyle: style.itemStyle,
+      z: style.z,
+      zlevel: style.zlevel,
+      data,
+    };
+  }).filter((s) => s.data.length > 0);
+
+  const pointSeriesSorted = pointSeries.sort((a, b) => {
+    const aTrades = a.source === "trades" ? 0 : 1;
+    const bTrades = b.source === "trades" ? 0 : 1;
+    if (aTrades !== bTrades) return aTrades - bTrades;
+    return String(a.name).localeCompare(String(b.name));
+  });
+
+  eventPriceLineSeriesCache = pointSeriesSorted.map((s) => ({ name: s.name, data: s.data }));
+  const buyData = [];
+  const sellData = [];
+  for (const marker of Array.isArray(tradeMarkers) ? tradeMarkers : []) {
+    if (!marker || typeof marker !== "object") continue;
+    if (typeof marker.ts !== "number" || typeof marker.price !== "number") continue;
+    const point = {
+      value: [marker.ts * 1000, marker.price],
+      meta: marker,
+    };
+    if (marker.side === "BUY") buyData.push(point);
+    else if (marker.side === "SELL") sellData.push(point);
+  }
+  const markerSeries = [];
+  if (buyData.length > 0) {
+    markerSeries.push({
+      name: "BUY",
+      type: "scatter",
+      symbol: "triangle",
+      symbolRotate: 0,
+      symbolSize: 14,
+      itemStyle: { color: "#1f9d55" },
+      data: buyData,
+      z: 20,
+      zlevel: 1,
+    });
+  }
+  if (sellData.length > 0) {
+    markerSeries.push({
+      name: "SELL",
+      type: "scatter",
+      symbol: "triangle",
+      symbolRotate: 180,
+      symbolSize: 14,
+      itemStyle: { color: "#d64545" },
+      data: sellData,
+      z: 20,
+      zlevel: 1,
+    });
+  }
+  const series = [...pointSeriesSorted, ...markerSeries];
+  const legendNames = [
+    ...pointSeriesSorted.map((s) => s.name),
+    ...(buyData.length > 0 ? ["BUY"] : []),
+    ...(sellData.length > 0 ? ["SELL"] : []),
+  ];
+
+  chart.setOption({
+    animation: false,
+    grid: { left: 56, right: 18, top: 48, bottom: 64 },
+    legend: { top: 8, type: "scroll", data: legendNames },
+    tooltip: {
+      trigger: "axis",
+      axisPointer: { type: "cross" },
+      formatter: (params) => {
+        if (!Array.isArray(params) || params.length === 0) return "";
+        const tsMs = params[0]?.axisValue;
+        const title = typeof tsMs === "number" ? new Date(tsMs).toLocaleString() : "";
+        const lines = [title];
+        for (const s of eventPriceLineSeriesCache) {
+          const val = readNearestPrice(s.data, tsMs);
+          lines.push(`${s.name}: ${val === null ? "-" : Number(val).toFixed(4)}`);
+        }
+        for (const item of params) {
+          if (item.seriesType !== "scatter") continue;
+          const meta = item?.data?.meta;
+          if (meta && typeof meta === "object") {
+            const size = typeof meta.size === "number" ? ` size=${meta.size.toFixed(2)}` : "";
+            const outcome = meta.outcome ? ` ${meta.outcome}` : "";
+            lines.push(`${item.marker}${item.seriesName}${outcome}${size}`);
+          }
+        }
+        return lines.join("<br/>");
+      },
+    },
+    xAxis: {
+      type: "time",
+      name: "时间",
+      nameLocation: "middle",
+      nameGap: 36,
+      axisLabel: { hideOverlap: true },
+    },
+    yAxis: {
+      type: "value",
+      name: "价格",
+      min: 0,
+      max: 1,
+      axisLabel: {
+        formatter: (val) => Number(val).toFixed(2),
+      },
+    },
+    dataZoom: [
+      { type: "inside", xAxisIndex: 0, filterMode: "none" },
+      { type: "slider", xAxisIndex: 0, bottom: 20, filterMode: "none" },
+    ],
+    series,
+  }, true);
+}
+
+function clearEventPriceHint(msg) {
+  if (eventPriceTitle) eventPriceTitle.textContent = "事件价格历史";
+  if (eventPriceMeta) eventPriceMeta.textContent = msg;
+  const chart = ensureEventChart();
+  if (!chart) return;
+  chart.clear();
+  chart.setOption({
+    graphic: {
+      type: "text",
+      left: "center",
+      top: "middle",
+      style: {
+        text: msg || "暂无价格点数据",
+        fill: "#857153",
+        fontSize: 12,
+      },
+    },
+  });
+}
+
+async function loadEventPriceChart() {
+  if (!state.user || !state.endpoint || state.endpoint !== "activity") {
+    clearEventPriceHint("仅 activity 页面支持");
+    return;
+  }
+  if (!Array.isArray(state.lastRows) || state.lastRows.length === 0) {
+    if (
+      state.eventPriceRef
+      && (state.eventPriceRef.condition_id || state.eventPriceRef.slug)
+    ) {
+      // Reuse last resolved single-event identity so "刷新CLOB图" can work without reloading table.
+    } else {
+      clearEventPriceHint("当前筛选无记录，无法判断单一事件");
+      return;
+    }
+  }
+  const conditionSet = new Set();
+  const slugSet = new Set();
+  let conditionId = "";
+  let eventSlug = "";
+  const tradeMarkers = [];
+  for (const row of state.lastRows || []) {
+    if (!row || typeof row !== "object") continue;
+    const c = String(row.conditionId || "").trim().toLowerCase();
+    const s = String(row.eventSlug || row.slug || "").trim().toLowerCase();
+    if (c) {
+      conditionSet.add(c);
+      if (!conditionId) conditionId = c;
+    }
+    if (s) {
+      slugSet.add(s);
+      if (!eventSlug) eventSlug = s;
+    }
+    const side = String(row.side || "").trim().toUpperCase();
+    const ts = readRowTs(row);
+    const price = toFiniteNumber(row.price) ?? toFiniteNumber(row.avgPrice);
+    const size = toFiniteNumber(row.size);
+    if ((side === "BUY" || side === "SELL") && ts !== null && price !== null) {
+      tradeMarkers.push({
+        side,
+        ts,
+        price,
+        size: Number.isFinite(size) ? size : null,
+        outcome: String(row.outcome || "").trim(),
+        asset: String(row.asset || "").trim(),
+      });
+    }
+  }
+  const singleByCondition = conditionSet.size === 1;
+  const singleBySlug = slugSet.size === 1;
+  if (singleByCondition || singleBySlug) {
+    if (!singleByCondition) conditionId = "";
+    if (!singleBySlug) eventSlug = "";
+    state.eventPriceRef = { condition_id: conditionId, slug: eventSlug };
+  } else if (state.eventPriceRef && (state.eventPriceRef.condition_id || state.eventPriceRef.slug)) {
+    conditionId = String(state.eventPriceRef.condition_id || "").trim().toLowerCase();
+    eventSlug = String(state.eventPriceRef.slug || "").trim().toLowerCase();
+  } else {
+    clearEventPriceHint("当前页不是单一事件，暂不展示价格图");
+    return;
+  }
+
+  const maxPoints = getEventPriceMaxPoints();
+  const params = new URLSearchParams({ clob_max_points: String(maxPoints) });
+  if (conditionId) params.append("condition_id", conditionId);
+  if (eventSlug) params.append("event_slug", eventSlug);
+
+  try {
+    const data = await fetchJson(`/api/user/${state.user}/event_price_points?${params.toString()}`);
+    if (!data || !data.available) {
+      if (data && data.reason === "event_identity_conflict") {
+        clearEventPriceHint("事件标识冲突：condition_id 与 event_slug 不一致，请重置筛选后重试");
+        return;
+      }
+      clearEventPriceHint("当前单一事件暂无价格历史数据");
+      return;
+    }
+    const event = data.event || {};
+    const title = event.title || event.slug || event.condition_id || "单事件";
+    state.eventPriceRef = {
+      condition_id: String(event.condition_id || conditionId || "").trim().toLowerCase(),
+      slug: String(event.slug || eventSlug || "").trim().toLowerCase(),
+    };
+    if (eventPriceTitle) eventPriceTitle.textContent = `事件价格历史: ${title}`;
+    const series = Array.isArray(data.series) ? data.series : [];
+    const pointsTotal = series.reduce((acc, item) => {
+      const count = Array.isArray(item.points) ? item.points.length : 0;
+      return acc + count;
+    }, 0);
+    const sourceCounter = {};
+    for (const item of series) {
+      const source = String(item?.source || "unknown").trim().toLowerCase() || "unknown";
+      sourceCounter[source] = (sourceCounter[source] || 0) + 1;
+    }
+    const sourceDesc = Object.entries(sourceCounter)
+      .map(([k, v]) => `${k}:${v}`)
+      .join(" / ");
+    if (eventPriceMeta) eventPriceMeta.textContent = `系列 ${series.length} 条(${sourceDesc})，展示点 ${pointsTotal} 个`;
+    drawEventPriceSeries(series, tradeMarkers);
+  } catch {
+    clearEventPriceHint("价格数据加载失败");
+  }
+}
+
 async function fetchJson(url, options = {}) {
   const res = await fetch(url, options);
   if (!res.ok) throw new Error(`Request failed: ${res.status}`);
@@ -147,7 +517,7 @@ function setLoading(isLoading, text = "加载中...") {
     userSelect, endpointSelect, queryInput, fromTsInput, toTsInput,
     applyBtn, resetBtn, prevBtn, nextBtn, limitSelect, sortSelect,
     showAllBtn, hideAllBtn, clearFiltersBtn, saveConfigBtn,
-    configSelect, saveAsBtn, deleteConfigBtn,
+    configSelect, saveAsBtn, deleteConfigBtn, eventPriceMaxPointsInput, eventPriceApplyBtn,
   ];
   controls.forEach((el) => {
     if (el) el.disabled = isLoading;
@@ -837,6 +1207,7 @@ async function loadRecords() {
       persistColumnState();
     }
     buildTable(state.lastRows, state.lastColumns);
+    await loadEventPriceChart();
     if (columnGrid.dataset.columnsKey !== state.lastColumnsKey || columnGrid.children.length === 0) {
       renderColumnControls(state.lastColumns);
       columnGrid.dataset.columnsKey = state.lastColumnsKey;
@@ -856,6 +1227,8 @@ function resetFilters() {
   state.fromTs = "";
   state.toTs = "";
   state.offset = 0;
+  state.eventPriceRef = null;
+  clearEventPriceHint("请筛选到单一事件后查看价格点");
 }
 
 applyBtn.addEventListener("click", async () => {
@@ -872,6 +1245,20 @@ resetBtn.addEventListener("click", async () => {
   clearViewForLoading("重置并加载中...");
   await loadRecords();
 });
+
+if (eventPriceApplyBtn) {
+  eventPriceApplyBtn.addEventListener("click", async () => {
+    getEventPriceMaxPoints();
+    await loadEventPriceChart();
+  });
+}
+
+if (eventPriceMaxPointsInput) {
+  eventPriceMaxPointsInput.addEventListener("change", async () => {
+    getEventPriceMaxPoints();
+    await loadEventPriceChart();
+  });
+}
 
 prevBtn.addEventListener("click", async () => {
   state.offset = Math.max(0, state.offset - state.limit);
@@ -916,6 +1303,7 @@ userSelect.addEventListener("change", async (e) => {
   state.lastRows = [];
   state.lastColumns = [];
   state.lastColumnsKey = "";
+  state.eventPriceRef = null;
   tableHead.innerHTML = "";
   columnGrid.innerHTML = "";
   columnGrid.dataset.columnsKey = "";
@@ -941,6 +1329,7 @@ endpointSelect.addEventListener("change", async (e) => {
   state.lastRows = [];
   state.lastColumns = [];
   state.lastColumnsKey = "";
+  state.eventPriceRef = null;
   tableHead.innerHTML = "";
   columnGrid.innerHTML = "";
   columnGrid.dataset.columnsKey = "";
@@ -1138,6 +1527,9 @@ function startResize(e, th, col) {
 }
 
 (async function init() {
+  window.addEventListener("resize", () => {
+    if (eventPriceChartInstance) eventPriceChartInstance.resize();
+  });
   await loadUsers();
   await loadEndpoints();
   await loadMetrics();

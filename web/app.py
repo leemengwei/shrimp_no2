@@ -20,6 +20,7 @@ from flask import Flask, jsonify, render_template, request
 DEFAULT_DATA_DIR = Path("data/polymarket/user_activities")
 LEGACY_DATA_DIR = Path("data/polymarket")
 DEFAULT_SPORTS_DIR = Path("data/polymarket/sports_history")
+DEFAULT_EVENT_PRICE_DIR = Path("data/market_price_by_clob_and_trades/by_user")
 
 
 def resolve_data_dir(cli_data_dir: Path) -> Path:
@@ -76,16 +77,6 @@ def resolve_sports_dir(cli_sports_dir: Path) -> Path:
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Local web dashboard for Polymarket data")
-    parser.add_argument(
-        "--data-dir",
-        default=str(DEFAULT_DATA_DIR),
-        help="Data root directory (user activity bundles)",
-    )
-    parser.add_argument(
-        "--sports-dir",
-        default=str(DEFAULT_SPORTS_DIR),
-        help="Sports history output directory (from collect_sports_history.py)",
-    )
     parser.add_argument("--host", default="0.0.0.0", help="Host to bind")
     parser.add_argument("--port", type=int, default=8000, help="Port to bind")
     parser.add_argument("--debug", action="store_true", help="Enable Flask debug")
@@ -564,6 +555,7 @@ app = Flask(__name__)
 DATA_DIR = resolve_data_dir(DEFAULT_DATA_DIR)
 SPORTS_DIR = DEFAULT_SPORTS_DIR
 DB_PATH = DATA_DIR / "dashboard.db"
+EVENT_PRICE_DIR = DEFAULT_EVENT_PRICE_DIR
 
 
 def _db_exists() -> bool:
@@ -833,6 +825,179 @@ def _stable_row_sort_key_desc(row: Dict[str, Any]) -> Tuple[Any, ...]:
     ts = extract_ts(row)
     ts_key = -(ts if ts is not None else -1)
     return (ts_key, *_activity_row_tie_breaker(row))
+
+
+def _normalize_event_identifier(row: Dict[str, Any]) -> Optional[str]:
+    condition_id = str(row.get("conditionId") or "").strip().lower()
+    if condition_id:
+        return f"cond:{condition_id}"
+    event_slug = str(row.get("eventSlug") or row.get("slug") or "").strip().lower()
+    if event_slug:
+        return f"slug:{event_slug}"
+    return None
+
+
+def _resolve_single_event_from_filters(
+    user: str,
+    endpoint: str,
+    query: str,
+    from_ts_i: Optional[int],
+    to_ts_i: Optional[int],
+    column_filters: Optional[Dict[str, Any]],
+) -> Optional[Dict[str, str]]:
+    with _db_connect() as conn:
+        where, params = _build_db_filters(endpoint, query, from_ts_i, to_ts_i, column_filters)
+        sql = (
+            f"SELECT row_json FROM records WHERE {' AND '.join(where)} "
+            "ORDER BY COALESCE(ts, -1) DESC, row_hash ASC LIMIT 8000"
+        )
+        rows_db = conn.execute(sql, [user, endpoint, *params]).fetchall()
+    event_keys: Set[str] = set()
+    resolved: Optional[Dict[str, str]] = None
+    for r in rows_db:
+        try:
+            decoded = json.loads(r["row_json"])
+        except (TypeError, json.JSONDecodeError):
+            continue
+        if not isinstance(decoded, dict):
+            continue
+        key = _normalize_event_identifier(decoded)
+        if not key:
+            continue
+        event_keys.add(key)
+        if key.startswith("cond:"):
+            resolved = {
+                "condition_id": key[len("cond:") :],
+                "slug": str(decoded.get("eventSlug") or decoded.get("slug") or "").strip().lower(),
+            }
+        elif key.startswith("slug:") and resolved is None:
+            resolved = {"condition_id": "", "slug": key[len("slug:") :]}
+        if len(event_keys) > 1:
+            return None
+    if len(event_keys) != 1 or resolved is None:
+        return None
+    return resolved
+
+
+def _market_matches_identity(
+    market: Dict[str, Any],
+    *,
+    condition_id: str,
+    event_slug: str,
+) -> bool:
+    m_condition = str(market.get("condition_id") or "").strip().lower()
+    m_slug = str(market.get("slug") or "").strip().lower()
+    if condition_id and event_slug:
+        return m_condition == condition_id and m_slug == event_slug
+    if condition_id:
+        return m_condition == condition_id
+    if event_slug:
+        return m_slug == event_slug
+    return False
+
+
+def _find_market_dir_by_identity(user: str, *, condition_id: str, event_slug: str) -> Optional[Path]:
+    market_root = EVENT_PRICE_DIR / user / "markets"
+    if not market_root.exists() or not market_root.is_dir():
+        return None
+    for market_dir in sorted(p for p in market_root.iterdir() if p.is_dir()):
+        manifest_path = market_dir / "manifest.json"
+        if not manifest_path.exists():
+            continue
+        try:
+            market_manifest = load_json(manifest_path)
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(market_manifest, dict):
+            continue
+        if _market_matches_identity(
+            market_manifest,
+            condition_id=condition_id,
+            event_slug=event_slug,
+        ):
+            return market_dir
+    return None
+
+
+def _iter_jsonl_rows(path: Path) -> Iterable[Any]:
+    if not path.exists() or not path.is_file():
+        return
+    with path.open("r", encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                yield json.loads(line)
+            except json.JSONDecodeError:
+                continue
+
+
+def _read_price_series(path: Path, token_id: str, token_label: str, source: str) -> Dict[str, Any]:
+    points: List[Dict[str, Any]] = []
+    min_ts = None
+    max_ts = None
+    for row in _iter_jsonl_rows(path):
+        if not isinstance(row, dict):
+            continue
+        ts = row.get("t")
+        price = row.get("p")
+        if not isinstance(ts, int):
+            continue
+        if not isinstance(price, (int, float)):
+            continue
+        min_ts = ts if min_ts is None else min(min_ts, ts)
+        max_ts = ts if max_ts is None else max(max_ts, ts)
+        points.append({"ts": ts, "price": float(price)})
+    return {
+        "token_id": token_id,
+        "token_label": token_label,
+        "source": source,
+        "series_name": f"{token_label} ({source})",
+        "points": points,
+        "points_total": len(points),
+        "min_ts": min_ts,
+        "max_ts": max_ts,
+        "file": str(path),
+    }
+
+
+def _append_series_from_file(
+    out: List[Dict[str, Any]],
+    *,
+    path: Optional[Path],
+    token_id: str,
+    token_label: str,
+    suffix: str,
+    max_points: int,
+) -> None:
+    if path is None or not path.exists() or not path.is_file():
+        return
+    token_series = _read_price_series(path, token_id=token_id, token_label=token_label, source=suffix)
+    points = token_series["points"]
+    # Only CLOB series follows max_points downsampling; trades keeps full fidelity.
+    if suffix == "clob" and len(points) > max_points:
+        step = max(1, len(points) // max_points)
+        token_series["points"] = points[::step]
+    out.append(token_series)
+
+
+def _resolve_history_path(raw_path: str, bases: List[Path]) -> Optional[Path]:
+    text = str(raw_path or "").strip()
+    if not text:
+        return None
+    path = Path(text)
+    if path.is_absolute():
+        return path
+    candidates: List[Path] = []
+    for base in bases:
+        candidates.append(base / path)
+    # Backward compatibility: keep legacy cwd-based relative resolution as last fallback.
+    candidates.append(Path.cwd() / path)
+    for candidate in candidates:
+        if candidate.exists():
+            return candidate
+    return candidates[0] if candidates else None
 
 
 @app.route("/")
@@ -1142,8 +1307,183 @@ def api_sports_points() -> Any:
     })
 
 
+@app.route("/api/user/<user>/event_price_points")
+def api_user_event_price_points(user: str) -> Any:
+    if not _db_exists():
+        return _db_missing_response()
+    condition_id = str(request.args.get("condition_id", "")).strip().lower()
+    event_slug = str(request.args.get("event_slug", "")).strip().lower()
+    raw_clob_max_points = request.args.get("clob_max_points", request.args.get("max_points", 250))
+    try:
+        clob_max_points = int(raw_clob_max_points)
+    except (TypeError, ValueError):
+        clob_max_points = 250
+    clob_max_points = max(1, min(clob_max_points, 1000000))
+    if not condition_id and not event_slug:
+        return jsonify({"available": False, "reason": "missing_event_identity"})
+
+    user_manifest_path = EVENT_PRICE_DIR / user / "manifest.json"
+    if not user_manifest_path.exists():
+        return jsonify({"available": False, "reason": "history_not_found"})
+    try:
+        user_manifest = load_json(user_manifest_path)
+    except json.JSONDecodeError:
+        return jsonify({"available": False, "reason": "history_manifest_invalid"})
+    user_manifest_dir = user_manifest_path.parent
+    markets = user_manifest.get("markets") if isinstance(user_manifest, dict) else None
+    if not isinstance(markets, list):
+        return jsonify({"available": False, "reason": "history_manifest_invalid"})
+
+    matched_market = None
+    for market in markets:
+        if not isinstance(market, dict):
+            continue
+        if _market_matches_identity(
+            market,
+            condition_id=condition_id,
+            event_slug=event_slug,
+        ):
+            matched_market = market
+            break
+    if not matched_market:
+        market_root = EVENT_PRICE_DIR / user / "markets"
+        if market_root.exists() and market_root.is_dir():
+            for market_dir in sorted(p for p in market_root.iterdir() if p.is_dir()):
+                manifest_path = market_dir / "manifest.json"
+                if not manifest_path.exists():
+                    continue
+                try:
+                    market_manifest = load_json(manifest_path)
+                except json.JSONDecodeError:
+                    continue
+                if not isinstance(market_manifest, dict):
+                    continue
+                if _market_matches_identity(
+                    market_manifest,
+                    condition_id=condition_id,
+                    event_slug=event_slug,
+                ):
+                    matched_market = dict(market_manifest)
+                    matched_market["_market_dir"] = str(market_dir)
+                    matched_market["_market_manifest_path"] = str(manifest_path)
+                    break
+    if not matched_market:
+        if condition_id and event_slug:
+            return jsonify(
+                {
+                    "available": False,
+                    "reason": "event_identity_conflict",
+                    "event": {"condition_id": condition_id, "slug": event_slug},
+                }
+            )
+        return jsonify(
+            {
+                "available": False,
+                "reason": "event_history_not_found",
+                "event": {"condition_id": condition_id, "slug": event_slug},
+            }
+        )
+
+    tokens = matched_market.get("tokens") if isinstance(matched_market.get("tokens"), list) else []
+    market_slug = str(matched_market.get("slug") or "")
+    event_ref = {"condition_id": condition_id, "slug": event_slug}
+    series_list: List[Dict[str, Any]] = []
+    global_min_ts = None
+    global_max_ts = None
+    strict_market_dir = _find_market_dir_by_identity(
+        user,
+        condition_id=condition_id,
+        event_slug=event_slug,
+    )
+    for idx, token in enumerate(tokens, start=1):
+        if not isinstance(token, dict):
+            continue
+        token_id = str(token.get("token_id") or "")
+        token_label = token_id or f"token_{idx}"
+        fallback_root_raw = matched_market.get("_market_dir")
+        fallback_root = Path(fallback_root_raw) if isinstance(fallback_root_raw, str) else None
+        market_manifest_path_raw = matched_market.get("_market_manifest_path")
+        market_manifest_path = (
+            Path(market_manifest_path_raw) if isinstance(market_manifest_path_raw, str) else None
+        )
+        market_manifest_dir = market_manifest_path.parent if market_manifest_path else None
+        market_dir_candidates: List[Path] = []
+        if fallback_root and fallback_root.exists():
+            market_dir_candidates = [fallback_root]
+        elif strict_market_dir and strict_market_dir.exists():
+            market_dir_candidates = [strict_market_dir]
+        elif market_slug:
+            market_dir_candidates = sorted((EVENT_PRICE_DIR / user / "markets").glob(f"*_{market_slug}"))
+        else:
+            market_dir_candidates = []
+
+        # New schema
+        clob_raw = str(token.get("clob_output_file") or "").strip()
+        trades_raw = str(token.get("trades_output_file") or "").strip()
+        base_candidates: List[Path] = []
+        if market_manifest_dir:
+            base_candidates.append(market_manifest_dir)
+        if fallback_root:
+            base_candidates.append(fallback_root)
+        base_candidates.append(user_manifest_dir)
+        clob_path = _resolve_history_path(clob_raw, base_candidates)
+        trades_path = _resolve_history_path(trades_raw, base_candidates)
+
+        if (not clob_path or not clob_path.exists()) and market_dir_candidates:
+            clob_candidate = market_dir_candidates[0] / f"token_{idx}_{token_id[:14]}_clob.jsonl"
+            clob_path = clob_candidate
+        if (not trades_path or not trades_path.exists()) and market_dir_candidates:
+            trades_candidate = market_dir_candidates[0] / f"token_{idx}_{token_id[:14]}_trades.jsonl"
+            trades_path = trades_candidate
+
+        _append_series_from_file(
+            series_list,
+            path=clob_path,
+            token_id=token_id,
+            token_label=token_label,
+            suffix="clob",
+            max_points=clob_max_points,
+        )
+        _append_series_from_file(
+            series_list,
+            path=trades_path,
+            token_id=token_id,
+            token_label=token_label,
+            suffix="trades",
+            max_points=clob_max_points,
+        )
+
+    for token_series in series_list:
+        if token_series["min_ts"] is not None:
+            global_min_ts = (
+                token_series["min_ts"] if global_min_ts is None else min(global_min_ts, token_series["min_ts"])
+            )
+        if token_series["max_ts"] is not None:
+            global_max_ts = (
+                token_series["max_ts"] if global_max_ts is None else max(global_max_ts, token_series["max_ts"])
+            )
+
+    if not series_list:
+        return jsonify({"available": False, "reason": "event_history_empty", "event": event_ref})
+
+    return jsonify(
+        {
+            "available": True,
+            "event": {
+                "condition_id": matched_market.get("condition_id"),
+                "slug": matched_market.get("slug"),
+                "title": matched_market.get("title"),
+            },
+            "series": series_list,
+            "min_ts": global_min_ts,
+            "max_ts": global_max_ts,
+        }
+    )
+
+
 if __name__ == "__main__":
     args = parse_args()
-    DATA_DIR = resolve_data_dir(Path(args.data_dir))
-    SPORTS_DIR = resolve_sports_dir(Path(args.sports_dir))
+    DATA_DIR = resolve_data_dir(DEFAULT_DATA_DIR)
+    SPORTS_DIR = resolve_sports_dir(DEFAULT_SPORTS_DIR)
+    EVENT_PRICE_DIR = DEFAULT_EVENT_PRICE_DIR
     app.run(host=args.host, port=args.port, debug=args.debug)
