@@ -193,10 +193,27 @@ button.ghost {
   padding: 12px;
 }
 
+.chart-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 8px;
+}
+
 .chart-title {
   color: var(--muted);
   font-size: 12px;
   margin-bottom: 8px;
+}
+
+.chart-toggle-btn {
+  font-size: 12px;
+  padding: 2px 8px;
+}
+
+.chart-card.collapsed .chart-meta,
+.chart-card.collapsed #eventPriceChart {
+  display: none;
 }
 
 .chart-meta {

@@ -14,7 +14,6 @@
         <p class="subtitle">本地数据展示与筛选</p>
         <div class="nav-links">
           <a class="nav-link active" href="/">用户数据</a>
-          <a class="nav-link" href="/sports">sportshistory</a>
         </div>
       </div>
       <div class="user-controls">
@@ -55,7 +54,8 @@
         CLOB最大点数
         <input id="eventPriceMaxPoints" type="number" min="1" max="1000000" step="100" value="250" />
       </label>
-      <button id="eventPriceApplyBtn" class="ghost">刷新CLOB图</button>
+      <button id="eventPriceApplyBtn" class="ghost">重新加载画布数据</button>
+      <button id="eventPriceClearBtn" class="ghost">清除画布</button>
     </section>
 
     <section class="summary" id="summaryBox">
@@ -95,7 +95,10 @@
 
     <section class="chart-section" id="eventPriceSection">
       <div class="chart-card">
-        <div class="chart-title" id="eventPriceTitle">事件价格历史</div>
+        <div class="chart-header">
+          <div class="chart-title" id="eventPriceTitle">事件价格历史</div>
+          <button id="eventPriceToggleBtn" class="ghost chart-toggle-btn" type="button">展开图表</button>
+        </div>
         <div class="chart-meta" id="eventPriceMeta">请先筛选到单一事件</div>
         <div id="eventPriceChart"></div>
       </div>

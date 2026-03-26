@@ -19,8 +19,8 @@ from flask import Flask, jsonify, render_template, request
 
 DEFAULT_DATA_DIR = Path("data/polymarket/user_activities")
 LEGACY_DATA_DIR = Path("data/polymarket")
-DEFAULT_SPORTS_DIR = Path("data/polymarket/sports_history")
 DEFAULT_EVENT_PRICE_DIR = Path("data/market_price_by_clob_and_trades/by_user")
+WEB_CONFIGS_PATH = Path("web_configs.json")
 
 
 def resolve_data_dir(cli_data_dir: Path) -> Path:
@@ -46,33 +46,6 @@ def resolve_data_dir(cli_data_dir: Path) -> Path:
             candidates.sort(key=lambda p: p.stat().st_mtime, reverse=True)
             return candidates[0]
     return cli_data_dir
-
-
-def resolve_sports_dir(cli_sports_dir: Path) -> Path:
-    if cli_sports_dir.exists() and (cli_sports_dir / "manifest.json").exists():
-        return cli_sports_dir
-    if cli_sports_dir == DEFAULT_SPORTS_DIR and DEFAULT_SPORTS_DIR.exists():
-        return DEFAULT_SPORTS_DIR
-
-    root = Path("data/polymarket")
-    if root.exists():
-        candidates: List[Tuple[float, Path]] = []
-        for p in root.glob("*"):
-            if not p.is_dir():
-                continue
-            manifest = p / "manifest.json"
-            if not manifest.exists():
-                continue
-            try:
-                payload = load_json(manifest)
-            except json.JSONDecodeError:
-                continue
-            if isinstance(payload, dict) and isinstance(payload.get("markets"), list):
-                candidates.append((manifest.stat().st_mtime, p))
-        if candidates:
-            candidates.sort(key=lambda x: x[0], reverse=True)
-            return candidates[0][1]
-    return cli_sports_dir
 
 
 def parse_args() -> argparse.Namespace:
@@ -128,24 +101,6 @@ def load_user_bundle(data_dir: Path, user: str) -> Dict[str, Any]:
     if path.exists():
         return load_json(path)
     return {}
-
-
-def configs_path(data_dir: Path, user: str) -> Path:
-    return data_dir / user / "web_configs.json"
-
-
-def load_web_configs(data_dir: Path, user: str) -> Dict[str, Any]:
-    path = configs_path(data_dir, user)
-    if path.exists():
-        try:
-            return load_json(path)
-        except json.JSONDecodeError:
-            return {}
-    return {}
-
-
-def save_web_configs(data_dir: Path, user: str, payload: Dict[str, Any]) -> None:
-    save_json(configs_path(data_dir, user), payload)
 
 
 def resolve_endpoint_files(data_dir: Path, user: str, endpoint: str) -> List[Path]:
@@ -247,28 +202,6 @@ def _activity_row_tie_breaker(row: Dict[str, Any]) -> Tuple[str, ...]:
 def _activity_row_sort_key(row: Dict[str, Any]) -> Tuple[Any, ...]:
     ts = extract_ts(row)
     return (ts if ts is not None else -1, *_activity_row_tie_breaker(row))
-
-
-def parse_ts_param(raw: Optional[str]) -> Optional[int]:
-    if not raw:
-        return None
-    text = raw.strip()
-    if not text:
-        return None
-    if text.isdigit():
-        return int(text)
-    if text.endswith("Z"):
-        text = text[:-1] + "+00:00"
-    try:
-        dt = datetime.fromisoformat(text)
-    except ValueError:
-        try:
-            dt = datetime.strptime(text, "%Y-%m-%d")
-        except ValueError:
-            return None
-    if dt.tzinfo is None:
-        dt = dt.replace(tzinfo=timezone.utc)
-    return int(dt.timestamp())
 
 
 def row_matches(row: Dict[str, Any], query: str) -> bool:
@@ -416,114 +349,6 @@ def summarize_rows(rows: Iterable[Dict[str, Any]]) -> Dict[str, Any]:
     return {"total": total, "min_ts": min_ts, "max_ts": max_ts}
 
 
-def load_sports_manifest(sports_dir: Path) -> Dict[str, Any]:
-    path = sports_dir / "manifest.json"
-    if path.exists():
-        return load_json(path)
-    return {}
-
-
-def resolve_sports_market_dir(sports_dir: Path, market: Dict[str, Any]) -> Optional[Path]:
-    index = market.get("index")
-    if not isinstance(index, int):
-        return None
-    slug = str(market.get("slug") or "").strip()
-    if slug:
-        exact = sports_dir / f"{index:05d}_{slug}"
-        if exact.exists() and exact.is_dir():
-            return exact
-    prefix = f"{index:05d}_"
-    matches = sorted(
-        (p for p in sports_dir.glob(f"{prefix}*") if p.is_dir()),
-        key=lambda p: p.name,
-    )
-    if matches:
-        return matches[0]
-    return None
-
-
-def iter_jsonl(path: Path) -> Iterable[Any]:
-    if not path.exists():
-        return
-    with path.open("r", encoding="utf-8") as f:
-        for line in f:
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                yield json.loads(line)
-            except json.JSONDecodeError:
-                continue
-
-
-def summarize_tokens(tokens: List[Dict[str, Any]]) -> Dict[str, Any]:
-    min_ts = None
-    max_ts = None
-    points = 0
-    unique_points = 0
-    for token in tokens:
-        if not isinstance(token, dict):
-            continue
-        points += int(token.get("points") or 0)
-        unique_points += int(token.get("unique_points") or 0)
-        t_min = token.get("min_ts")
-        t_max = token.get("max_ts")
-        if isinstance(t_min, int):
-            min_ts = t_min if min_ts is None else min(min_ts, t_min)
-        if isinstance(t_max, int):
-            max_ts = t_max if max_ts is None else max(max_ts, t_max)
-    return {
-        "min_ts": min_ts,
-        "max_ts": max_ts,
-        "points": points,
-        "unique_points": unique_points,
-    }
-
-
-def list_sports_markets(manifest: Dict[str, Any]) -> List[Dict[str, Any]]:
-    markets = manifest.get("markets") if isinstance(manifest, dict) else None
-    if not isinstance(markets, list):
-        return []
-    out: List[Dict[str, Any]] = []
-    for market in markets:
-        if not isinstance(market, dict):
-            continue
-        tokens = market.get("tokens") if isinstance(market.get("tokens"), list) else []
-        stats = summarize_tokens(tokens)
-        out.append(
-            {
-                "index": market.get("index"),
-                "market_id": market.get("market_id"),
-                "condition_id": market.get("condition_id"),
-                "slug": market.get("slug"),
-                "question": market.get("question"),
-                "token_count": len(market.get("token_ids") or []),
-                "min_ts": stats["min_ts"],
-                "max_ts": stats["max_ts"],
-                "points": stats["points"],
-                "unique_points": stats["unique_points"],
-            }
-        )
-    out.sort(
-        key=lambda m: (
-            -(int(m.get("points") or 0)),
-            -(int(m.get("unique_points") or 0)),
-            int(m.get("index") or 0),
-        )
-    )
-    return out
-
-
-def resolve_market_entry(manifest: Dict[str, Any], index: int) -> Optional[Dict[str, Any]]:
-    markets = manifest.get("markets") if isinstance(manifest, dict) else None
-    if not isinstance(markets, list):
-        return None
-    for market in markets:
-        if isinstance(market, dict) and market.get("index") == index:
-            return market
-    return None
-
-
 def load_metrics(data_dir: Path, user: str) -> Dict[str, Any]:
     manifest = load_manifest(data_dir, user)
     bundle = load_user_bundle(data_dir, user)
@@ -553,7 +378,6 @@ def load_metrics(data_dir: Path, user: str) -> Dict[str, Any]:
 
 app = Flask(__name__)
 DATA_DIR = resolve_data_dir(DEFAULT_DATA_DIR)
-SPORTS_DIR = DEFAULT_SPORTS_DIR
 DB_PATH = DATA_DIR / "dashboard.db"
 EVENT_PRICE_DIR = DEFAULT_EVENT_PRICE_DIR
 
@@ -565,17 +389,6 @@ def _db_exists() -> bool:
 def _db_connect() -> sqlite3.Connection:
     conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
-    conn.execute(
-        """
-        CREATE TABLE IF NOT EXISTS web_configs (
-            user TEXT NOT NULL,
-            endpoint TEXT NOT NULL,
-            payload_json TEXT NOT NULL,
-            updated_at INTEGER NOT NULL DEFAULT (strftime('%s', 'now')),
-            PRIMARY KEY (user, endpoint)
-        )
-        """
-    )
     return conn
 
 
@@ -700,8 +513,9 @@ def _build_db_filters(
     if endpoint == "activity":
         where.append("COALESCE(type_upper, '') != 'YIELD'")
     if query:
-        where.append("row_text LIKE ?")
-        params.append(f"%{query.lower()}%")
+        # Exact match on slug only (not eventSlug / marketSlug).
+        where.append("LOWER(COALESCE(CAST(json_extract(row_json, '$.slug') AS TEXT), '')) = ?")
+        params.append(query.lower())
     if from_ts_i is not None:
         where.append("(ts IS NULL OR ts >= ?)")
         params.append(from_ts_i)
@@ -778,43 +592,48 @@ def _load_records_from_db(
         return {"rows": rows, "total": total, "all_columns": all_columns}
 
 
-def _db_get_configs(user: str, endpoint: str) -> Dict[str, Any]:
-    with _db_connect() as conn:
-        row = conn.execute(
-            "SELECT payload_json FROM web_configs WHERE user = ? AND endpoint = ?",
-            (user, endpoint),
-        ).fetchone()
-    if not row:
-        return {"active": "默认", "configs": {}}
+def _load_file_configs_store() -> Dict[str, Any]:
+    if not WEB_CONFIGS_PATH.exists():
+        return {}
     try:
-        payload = json.loads(row["payload_json"])
-    except (TypeError, json.JSONDecodeError):
+        payload = load_json(WEB_CONFIGS_PATH)
+    except json.JSONDecodeError:
+        return {}
+    return payload if isinstance(payload, dict) else {}
+
+
+def _save_file_configs_store(store: Dict[str, Any]) -> None:
+    normalized = store if isinstance(store, dict) else {}
+    save_json(WEB_CONFIGS_PATH, normalized)
+
+
+def _file_get_configs(user: str, endpoint: str) -> Dict[str, Any]:
+    store = _load_file_configs_store()
+    endpoints = store.get("endpoints")
+    if not isinstance(endpoints, dict):
         return {"active": "默认", "configs": {}}
-    if not isinstance(payload, dict):
+    endpoint_entry = endpoints.get(endpoint)
+    if not isinstance(endpoint_entry, dict):
         return {"active": "默认", "configs": {}}
     return {
-        "active": payload.get("active") or "默认",
-        "configs": payload.get("configs") if isinstance(payload.get("configs"), dict) else {},
+        "active": endpoint_entry.get("active") or "默认",
+        "configs": endpoint_entry.get("configs")
+        if isinstance(endpoint_entry.get("configs"), dict)
+        else {},
     }
 
 
-def _db_save_configs(user: str, endpoint: str, payload: Dict[str, Any]) -> None:
-    normalized = {
+def _file_save_configs(user: str, endpoint: str, payload: Dict[str, Any]) -> None:
+    store = _load_file_configs_store()
+    endpoints = store.get("endpoints")
+    if not isinstance(endpoints, dict):
+        endpoints = {}
+        store["endpoints"] = endpoints
+    endpoints[endpoint] = {
         "active": payload.get("active") or "默认",
         "configs": payload.get("configs") if isinstance(payload.get("configs"), dict) else {},
     }
-    with _db_connect() as conn:
-        conn.execute(
-            """
-            INSERT INTO web_configs(user, endpoint, payload_json, updated_at)
-            VALUES (?, ?, ?, strftime('%s', 'now'))
-            ON CONFLICT(user, endpoint) DO UPDATE SET
-                payload_json = excluded.payload_json,
-                updated_at = excluded.updated_at
-            """,
-            (user, endpoint, json.dumps(normalized, ensure_ascii=False)),
-        )
-        conn.commit()
+    _save_file_configs_store(store)
 
 
 def _stable_row_sort_key(row: Dict[str, Any]) -> Tuple[Any, ...]:
@@ -1005,11 +824,6 @@ def index() -> str:
     return render_template("index.html")
 
 
-@app.route("/sports")
-def sports_index() -> str:
-    return render_template("sports.html")
-
-
 @app.route("/api/users")
 def api_users() -> Any:
     if not _db_exists():
@@ -1091,11 +905,11 @@ def api_user_configs(user: str) -> Any:
     if request.method == "GET":
         endpoint = request.args.get("endpoint", "")
         if endpoint:
-            return jsonify(_db_get_configs(user, endpoint))
+            return jsonify(_file_get_configs(user, endpoint))
         endpoints = _db_list_endpoints(user)
         payload = {}
         for ep in endpoints:
-            payload[ep] = _db_get_configs(user, ep)
+            payload[ep] = _file_get_configs(user, ep)
         return jsonify(payload)
 
     data = request.get_json(silent=True) or {}
@@ -1107,7 +921,7 @@ def api_user_configs(user: str) -> Any:
         if action != "delete":
             return jsonify({"error": "invalid payload"}), 400
 
-    entry = _db_get_configs(user, endpoint)
+    entry = _file_get_configs(user, endpoint)
     entry_configs = entry.get("configs", {})
 
     if action == "delete":
@@ -1116,14 +930,14 @@ def api_user_configs(user: str) -> Any:
             del entry_configs[name]
         entry["configs"] = entry_configs
         entry["active"] = data.get("active", "默认")
-        _db_save_configs(user, endpoint, entry)
+        _file_save_configs(user, endpoint, entry)
         return jsonify({"ok": True, "active": entry["active"]})
 
     entry["active"] = active
     name = config.get("name") or active or "默认"
     entry_configs[name] = config
     entry["configs"] = entry_configs
-    _db_save_configs(user, endpoint, entry)
+    _file_save_configs(user, endpoint, entry)
     return jsonify({"ok": True, "active": active, "name": name})
 
 
@@ -1184,129 +998,6 @@ def api_records(user: str) -> Any:
     })
 
 
-@app.route("/api/sports/summary")
-def api_sports_summary() -> Any:
-    manifest = load_sports_manifest(SPORTS_DIR)
-    markets = list_sports_markets(manifest)
-    summary = {
-        "generated_at": manifest.get("generated_at"),
-        "start_ts": manifest.get("start_ts"),
-        "end_ts": manifest.get("end_ts"),
-        "start_ts_utc": manifest.get("start_ts_utc"),
-        "end_ts_utc": manifest.get("end_ts_utc"),
-        "fidelity": manifest.get("fidelity"),
-        "chunk_days": manifest.get("chunk_days"),
-        "markets_total": manifest.get("markets_total"),
-        "sports_markets_total": manifest.get("sports_markets_total"),
-        "available_markets": len(markets),
-    }
-    return jsonify(summary)
-
-
-@app.route("/api/sports/markets")
-def api_sports_markets() -> Any:
-    manifest = load_sports_manifest(SPORTS_DIR)
-    query = request.args.get("query", "").strip().lower()
-    markets = list_sports_markets(manifest)
-    if query:
-        filtered = []
-        for market in markets:
-            text = f"{market.get('question') or ''} {market.get('slug') or ''}".lower()
-            if query in text:
-                filtered.append(market)
-        markets = filtered
-    return jsonify({"markets": markets})
-
-
-@app.route("/api/sports/market/<int:index>")
-def api_sports_market(index: int) -> Any:
-    manifest = load_sports_manifest(SPORTS_DIR)
-    market = resolve_market_entry(manifest, index)
-    if not market:
-        return jsonify({"error": "market not found"}), 404
-    tokens = market.get("tokens") if isinstance(market.get("tokens"), list) else []
-    stats = summarize_tokens(tokens)
-    payload = dict(market)
-    payload["summary"] = stats
-    return jsonify(payload)
-
-
-@app.route("/api/sports/points")
-def api_sports_points() -> Any:
-    market_index_raw = request.args.get("market_index", "")
-    token_id = request.args.get("token_id", "")
-    sort_order = request.args.get("sort", "asc")
-    limit = int(request.args.get("limit", 1000))
-    offset = int(request.args.get("offset", 0))
-    from_ts = parse_ts_param(request.args.get("from_ts"))
-    to_ts = parse_ts_param(request.args.get("to_ts"))
-    include_raw = request.args.get("raw", "0") == "1"
-
-    if not market_index_raw.isdigit():
-        return jsonify({"error": "market_index required"}), 400
-    if not token_id:
-        return jsonify({"error": "token_id required"}), 400
-    market_index = int(market_index_raw)
-
-    manifest = load_sports_manifest(SPORTS_DIR)
-    market = resolve_market_entry(manifest, market_index)
-    if not market:
-        return jsonify({"error": "market not found"}), 404
-
-    market_dir = resolve_sports_market_dir(SPORTS_DIR, market)
-    if market_dir is None:
-        return jsonify({"error": "market dir not found"}), 404
-    points_path = market_dir / "points" / f"{token_id}.jsonl"
-    if not points_path.exists():
-        return jsonify({"error": "points file not found"}), 404
-
-    rows: List[Dict[str, Any]] = []
-    min_ts = None
-    max_ts = None
-    for row in iter_jsonl(points_path):
-        if not isinstance(row, dict):
-            continue
-        ts = row.get("ts")
-        if not isinstance(ts, int):
-            continue
-        if from_ts is not None and ts < from_ts:
-            continue
-        if to_ts is not None and ts > to_ts:
-            continue
-        min_ts = ts if min_ts is None else min(min_ts, ts)
-        max_ts = ts if max_ts is None else max(max_ts, ts)
-        payload = {
-            "ts": ts,
-            "price": row.get("price"),
-        }
-        if include_raw:
-            payload["raw"] = row.get("raw")
-        rows.append(payload)
-
-    total = len(rows)
-    if sort_order == "desc":
-        rows.sort(key=lambda r: r.get("ts", 0), reverse=True)
-    else:
-        rows.sort(key=lambda r: r.get("ts", 0))
-
-    if limit <= 0:
-        page = rows
-    else:
-        page = rows[offset : offset + min(limit, 5000)]
-
-    return jsonify({
-        "market_index": market_index,
-        "token_id": token_id,
-        "rows": page,
-        "total": total,
-        "min_ts": min_ts,
-        "max_ts": max_ts,
-        "limit": limit,
-        "offset": offset,
-        "file": str(points_path),
-    })
-
-
 @app.route("/api/user/<user>/event_price_points")
 def api_user_event_price_points(user: str) -> Any:
     if not _db_exists():
@@ -1334,10 +1025,46 @@ def api_user_event_price_points(user: str) -> Any:
     if not isinstance(markets, list):
         return jsonify({"available": False, "reason": "history_manifest_invalid"})
 
-    matched_market = None
+    market_candidates: List[Dict[str, Any]] = []
+    seen_market_keys: Set[Tuple[str, str]] = set()
     for market in markets:
         if not isinstance(market, dict):
             continue
+        market_copy = dict(market)
+        key = (
+            str(market_copy.get("condition_id") or "").strip().lower(),
+            str(market_copy.get("slug") or "").strip().lower(),
+        )
+        if key in seen_market_keys:
+            continue
+        seen_market_keys.add(key)
+        market_candidates.append(market_copy)
+    market_root = EVENT_PRICE_DIR / user / "markets"
+    if market_root.exists() and market_root.is_dir():
+        for market_dir in sorted(p for p in market_root.iterdir() if p.is_dir()):
+            manifest_path = market_dir / "manifest.json"
+            if not manifest_path.exists():
+                continue
+            try:
+                market_manifest = load_json(manifest_path)
+            except json.JSONDecodeError:
+                continue
+            if not isinstance(market_manifest, dict):
+                continue
+            market_copy = dict(market_manifest)
+            market_copy["_market_dir"] = str(market_dir)
+            market_copy["_market_manifest_path"] = str(manifest_path)
+            key = (
+                str(market_copy.get("condition_id") or "").strip().lower(),
+                str(market_copy.get("slug") or "").strip().lower(),
+            )
+            if key in seen_market_keys:
+                continue
+            seen_market_keys.add(key)
+            market_candidates.append(market_copy)
+
+    matched_market = None
+    for market in market_candidates:
         if _market_matches_identity(
             market,
             condition_id=condition_id,
@@ -1346,33 +1073,48 @@ def api_user_event_price_points(user: str) -> Any:
             matched_market = market
             break
     if not matched_market:
-        market_root = EVENT_PRICE_DIR / user / "markets"
-        if market_root.exists() and market_root.is_dir():
-            for market_dir in sorted(p for p in market_root.iterdir() if p.is_dir()):
-                manifest_path = market_dir / "manifest.json"
-                if not manifest_path.exists():
-                    continue
-                try:
-                    market_manifest = load_json(manifest_path)
-                except json.JSONDecodeError:
-                    continue
-                if not isinstance(market_manifest, dict):
-                    continue
-                if _market_matches_identity(
-                    market_manifest,
-                    condition_id=condition_id,
-                    event_slug=event_slug,
-                ):
-                    matched_market = dict(market_manifest)
-                    matched_market["_market_dir"] = str(market_dir)
-                    matched_market["_market_manifest_path"] = str(manifest_path)
-                    break
+        cond_matches = [
+            m for m in market_candidates if _market_matches_identity(m, condition_id=condition_id, event_slug="")
+        ]
+        slug_matches = [
+            m for m in market_candidates if _market_matches_identity(m, condition_id="", event_slug=event_slug)
+        ]
+        if condition_id and event_slug:
+            overlap = []
+            slug_keys = {
+                (
+                    str(m.get("condition_id") or "").strip().lower(),
+                    str(m.get("slug") or "").strip().lower(),
+                )
+                for m in slug_matches
+            }
+            for m in cond_matches:
+                key = (
+                    str(m.get("condition_id") or "").strip().lower(),
+                    str(m.get("slug") or "").strip().lower(),
+                )
+                if key in slug_keys:
+                    overlap.append(m)
+            if overlap:
+                matched_market = overlap[0]
+            elif cond_matches and slug_matches:
+                return jsonify(
+                    {
+                        "available": False,
+                        "reason": "event_identity_conflict",
+                        "event": {"condition_id": condition_id, "slug": event_slug},
+                    }
+                )
+        elif condition_id and cond_matches:
+            matched_market = cond_matches[0]
+        elif event_slug and slug_matches:
+            matched_market = slug_matches[0]
     if not matched_market:
         if condition_id and event_slug:
             return jsonify(
                 {
                     "available": False,
-                    "reason": "event_identity_conflict",
+                    "reason": "event_history_not_found",
                     "event": {"condition_id": condition_id, "slug": event_slug},
                 }
             )
@@ -1484,6 +1226,5 @@ def api_user_event_price_points(user: str) -> Any:
 if __name__ == "__main__":
     args = parse_args()
     DATA_DIR = resolve_data_dir(DEFAULT_DATA_DIR)
-    SPORTS_DIR = resolve_sports_dir(DEFAULT_SPORTS_DIR)
     EVENT_PRICE_DIR = DEFAULT_EVENT_PRICE_DIR
     app.run(host=args.host, port=args.port, debug=args.debug)

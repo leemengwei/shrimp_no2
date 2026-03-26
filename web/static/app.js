@@ -9,6 +9,7 @@ const state = {
   toTs: "",
   eventPriceMaxPoints: 250,
   eventPriceRef: null,
+  eventPriceCollapsed: true,
   view: "full",
   sort: "desc",
   visibleColumns: new Set(),
@@ -64,10 +65,14 @@ const loadingText = document.getElementById("loadingText");
 const eventPriceTitle = document.getElementById("eventPriceTitle");
 const eventPriceMeta = document.getElementById("eventPriceMeta");
 const eventPriceChart = document.getElementById("eventPriceChart");
+const eventPriceSection = document.getElementById("eventPriceSection");
+const eventPriceToggleBtn = document.getElementById("eventPriceToggleBtn");
 const eventPriceMaxPointsInput = document.getElementById("eventPriceMaxPoints");
 const eventPriceApplyBtn = document.getElementById("eventPriceApplyBtn");
+const eventPriceClearBtn = document.getElementById("eventPriceClearBtn");
 let eventPriceChartInstance = null;
 let eventPriceLineSeriesCache = [];
+let eventSharesSeriesCache = [];
 
 function viewMemoryKey(user, endpoint) {
   if (!user || !endpoint) return "";
@@ -142,6 +147,12 @@ function formatTs(ts) {
   return dt.toISOString().replace("T", " ").slice(0, 19);
 }
 
+function formatTsMsUtc(tsMs) {
+  if (!Number.isFinite(tsMs)) return "-";
+  const dt = new Date(tsMs);
+  return dt.toISOString().replace("T", " ").slice(0, 19);
+}
+
 function formatNumber(val, digits = 2) {
   if (val === null || val === undefined || Number.isNaN(val)) return "-";
   return Number(val).toLocaleString(undefined, {
@@ -169,7 +180,7 @@ function readRowTs(row) {
 }
 
 function readNearestPrice(seriesData, tsMs) {
-  if (!Array.isArray(seriesData) || seriesData.length === 0) return null;
+  if (!Array.isArray(seriesData) || seriesData.length === 0 || !Number.isFinite(tsMs)) return null;
   let lo = 0;
   let hi = seriesData.length - 1;
   while (lo < hi) {
@@ -184,6 +195,19 @@ function readNearestPrice(seriesData, tsMs) {
   if (cand.length === 0) return null;
   cand.sort((a, b) => Math.abs(a[0] - tsMs) - Math.abs(b[0] - tsMs));
   return cand[0][1];
+}
+
+function normalizeAxisTsMs(raw) {
+  if (typeof raw === "number" && Number.isFinite(raw)) return raw;
+  if (typeof raw === "string") {
+    const trimmed = raw.trim();
+    if (!trimmed) return null;
+    const asNum = Number(trimmed);
+    if (Number.isFinite(asNum)) return asNum;
+    const parsed = Date.parse(trimmed);
+    if (Number.isFinite(parsed)) return parsed;
+  }
+  return null;
 }
 
 function getEventPriceMaxPoints() {
@@ -204,10 +228,68 @@ function ensureEventChart() {
   return eventPriceChartInstance;
 }
 
-function drawEventPriceSeries(seriesList, tradeMarkers = []) {
+function disposeEventChart() {
+  if (!eventPriceChartInstance) return;
+  try {
+    eventPriceChartInstance.dispose();
+  } catch {
+    // ignore dispose errors and rebuild lazily
+  }
+  eventPriceChartInstance = null;
+}
+
+async function reloadEventChartCanvasData() {
+  disposeEventChart();
+  await waitNextPaint();
+  await loadEventPriceChart();
+}
+
+function hexToRgb(hex) {
+  const cleaned = String(hex || "").replace("#", "");
+  if (!cleaned || (cleaned.length !== 6 && cleaned.length !== 3)) return null;
+  const full = cleaned.length === 3
+    ? cleaned.split("").map((c) => `${c}${c}`).join("")
+    : cleaned;
+  const intVal = Number.parseInt(full, 16);
+  if (!Number.isFinite(intVal)) return null;
+  return {
+    r: (intVal >> 16) & 255,
+    g: (intVal >> 8) & 255,
+    b: intVal & 255,
+  };
+}
+
+function rgbToHex(r, g, b) {
+  const clamp = (n) => Math.max(0, Math.min(255, Math.round(n)));
+  return `#${[clamp(r), clamp(g), clamp(b)].map((n) => n.toString(16).padStart(2, "0")).join("")}`;
+}
+
+function mixHex(hexA, hexB, ratio) {
+  const a = hexToRgb(hexA);
+  const b = hexToRgb(hexB);
+  if (!a || !b) return hexA;
+  const t = Math.max(0, Math.min(1, ratio));
+  return rgbToHex(
+    a.r + (b.r - a.r) * t,
+    a.g + (b.g - a.g) * t,
+    a.b + (b.b - a.b) * t,
+  );
+}
+
+function rgbaFromHex(hex, alpha) {
+  const rgb = hexToRgb(hex);
+  if (!rgb) return `rgba(127,140,141,${alpha})`;
+  const a = Math.max(0, Math.min(1, alpha));
+  return `rgba(${rgb.r},${rgb.g},${rgb.b},${a})`;
+}
+
+function drawEventPriceSeries(seriesList, tradeMarkers = [], positionSeries = []) {
   const chart = ensureEventChart();
   if (!chart) return;
   const normalized = Array.isArray(seriesList) ? seriesList : [];
+  const tokenPalette = [
+    "#1f77b4", "#e67e22", "#16a085", "#c0392b", "#7f8c8d", "#2e86de", "#d35400", "#27ae60",
+  ];
   const tokenAliasMap = new Map();
   let tokenIdx = 1;
   for (const item of normalized) {
@@ -218,58 +300,56 @@ function drawEventPriceSeries(seriesList, tradeMarkers = []) {
       tokenIdx += 1;
     }
   }
-  const sourceStyleMap = {
-    clob: {
-      color: "#1f77b4",
-      symbolSize: 5,
-      symbol: "circle",
-      z: 12,
-      zlevel: 1,
-      itemStyle: {
-        color: "rgba(31,119,180,0.08)",
-        borderColor: "#1f77b4",
-        borderWidth: 1,
-      },
-    },
-    trades: {
-      color: "#ff3b30",
-      symbolSize: 10,
-      symbol: "circle",
-      z: 6,
-      zlevel: 1,
-      itemStyle: {
-        color: "rgba(255,59,48,0.55)",
-        borderColor: "#ff3b30",
-        borderWidth: 1.5,
-      },
-    },
-  };
+  const tokenStyleMap = new Map();
+  for (const [tokenId, alias] of tokenAliasMap.entries()) {
+    const idx = Number.parseInt(String(alias).replace("token", ""), 10) || 1;
+    const base = tokenPalette[(idx - 1) % tokenPalette.length];
+    tokenStyleMap.set(tokenId, {
+      base,
+      clobBorder: mixHex(base, "#ffffff", 0.05),
+      clobFill: rgbaFromHex(base, 0.12),
+      tradesBorder: mixHex(base, "#000000", 0.18),
+      tradesFill: rgbaFromHex(base, 0.55),
+      buyColor: mixHex(base, "#ffffff", 0.18),
+      sellColor: mixHex(base, "#000000", 0.18),
+    });
+  }
   const pointSeries = normalized.map((item, idx) => {
     const points = Array.isArray(item.points) ? item.points : [];
     const data = points
       .filter((p) => typeof p.ts === "number" && typeof p.price === "number")
-      .map((p) => [p.ts * 1000, p.price]);
+      .map((p) => [p.ts * 1000, p.price])
+      .sort((a, b) => a[0] - b[0]);
     const source = String(item.source || "").trim().toLowerCase();
-    const style = sourceStyleMap[source] || {
-      color: "#7f8c8d",
-      symbolSize: 6,
-      symbol: "circle",
-      z: 8,
-      zlevel: 1,
-      itemStyle: { color: "rgba(127,140,141,0.45)", borderColor: "#7f8c8d", borderWidth: 1 },
-    };
     const tokenId = String(item.token_id || "").trim();
     const tokenAlias = tokenAliasMap.get(tokenId) || `token${idx + 1}`;
+    const style = tokenStyleMap.get(tokenId) || {
+      base: "#7f8c8d",
+      clobBorder: "#7f8c8d",
+      clobFill: "rgba(127,140,141,0.12)",
+      tradesBorder: "#5f6c6d",
+      tradesFill: "rgba(127,140,141,0.55)",
+      buyColor: "#9aa7a8",
+      sellColor: "#5f6c6d",
+    };
+    const isTrades = source === "trades";
     const displayName = `${tokenAlias}(${source || "unknown"})`;
     return {
       name: displayName,
       source,
+      tokenId,
+      tokenAlias,
       type: "scatter",
-      symbol: style.symbol,
-      symbolSize: style.symbolSize,
-      itemStyle: style.itemStyle,
-      z: style.z,
-      zlevel: style.zlevel,
+      progressive: 0,
+      symbol: "circle",
+      symbolSize: isTrades ? 10 : 5,
+      itemStyle: {
+        color: isTrades ? style.tradesFill : style.clobFill,
+        borderColor: isTrades ? style.tradesBorder : style.clobBorder,
+        borderWidth: isTrades ? 1.5 : 1,
+      },
+      z: isTrades ? 6 : 12,
+      zlevel: 1,
       data,
     };
   }).filter((s) => s.data.length > 0);
@@ -282,52 +362,97 @@ function drawEventPriceSeries(seriesList, tradeMarkers = []) {
   });
 
   eventPriceLineSeriesCache = pointSeriesSorted.map((s) => ({ name: s.name, data: s.data }));
-  const buyData = [];
-  const sellData = [];
+  const markerByTokenSide = new Map();
   for (const marker of Array.isArray(tradeMarkers) ? tradeMarkers : []) {
     if (!marker || typeof marker !== "object") continue;
     if (typeof marker.ts !== "number" || typeof marker.price !== "number") continue;
+    const tokenId = String(marker.asset || "").trim();
+    const side = String(marker.side || "").trim().toUpperCase();
+    if (!tokenId || (side !== "BUY" && side !== "SELL")) continue;
+    const tokenAlias = tokenAliasMap.get(tokenId) || tokenId.slice(0, 8) || "token";
+    const key = `${tokenId}::${side}`;
+    if (!markerByTokenSide.has(key)) {
+      markerByTokenSide.set(key, { tokenId, tokenAlias, side, points: [] });
+    }
     const point = {
       value: [marker.ts * 1000, marker.price],
-      meta: marker,
+      meta: { ...marker, tokenId, tokenAlias },
     };
-    if (marker.side === "BUY") buyData.push(point);
-    else if (marker.side === "SELL") sellData.push(point);
+    markerByTokenSide.get(key).points.push(point);
   }
-  const markerSeries = [];
-  if (buyData.length > 0) {
-    markerSeries.push({
-      name: "BUY",
-      type: "scatter",
-      symbol: "triangle",
-      symbolRotate: 0,
-      symbolSize: 14,
-      itemStyle: { color: "#1f9d55" },
-      data: buyData,
-      z: 20,
-      zlevel: 1,
-    });
-  }
-  if (sellData.length > 0) {
-    markerSeries.push({
-      name: "SELL",
-      type: "scatter",
-      symbol: "triangle",
-      symbolRotate: 180,
-      symbolSize: 14,
-      itemStyle: { color: "#d64545" },
-      data: sellData,
-      z: 20,
-      zlevel: 1,
-    });
-  }
-  const series = [...pointSeriesSorted, ...markerSeries];
+  const markerSeries = Array.from(markerByTokenSide.values()).flatMap((g) => {
+    const style = tokenStyleMap.get(g.tokenId) || {
+      buyColor: "#9aa7a8",
+      sellColor: "#5f6c6d",
+    };
+    const isBuy = g.side === "BUY";
+    const color = isBuy ? style.buyColor : style.sellColor;
+    const lineName = `${g.tokenAlias}(${g.side}-line)`;
+    const lineCarrier = {
+      name: lineName,
+      type: "line",
+      progressive: 0,
+      data: [],
+      showSymbol: false,
+      lineStyle: { opacity: 0 },
+      tooltip: { show: false },
+      markLine: {
+        symbol: "none",
+        silent: true,
+        animation: false,
+        label: { show: false },
+        lineStyle: {
+          color,
+          width: isBuy ? 1.2 : 1.1,
+          type: isBuy ? "solid" : "dashed",
+          opacity: 0.5,
+        },
+        data: g.points.map((p) => ({ xAxis: p.value[0] })),
+      },
+      z: 4,
+      zlevel: 0,
+    };
+    return [lineCarrier];
+  });
+  const sharesLineSeries = Array.isArray(positionSeries)
+    ? positionSeries.map((item) => {
+      const tokenId = String(item?.token_id || "").trim();
+      const tokenAlias = tokenAliasMap.get(tokenId) || String(item?.token_alias || tokenId.slice(0, 8) || "token");
+      const style = tokenStyleMap.get(tokenId) || { base: "#7f8c8d" };
+      const points = Array.isArray(item?.points) ? item.points : [];
+      const data = points
+        .filter((p) => typeof p?.ts === "number" && typeof p?.shares === "number")
+        .map((p) => [p.ts * 1000, p.shares])
+        .sort((a, b) => a[0] - b[0]);
+      return {
+        name: `${tokenAlias}(shares)`,
+        type: "line",
+        progressive: 0,
+        yAxisIndex: 1,
+        step: "end",
+        showSymbol: false,
+        smooth: false,
+        lineStyle: {
+          color: mixHex(style.base, "#ffffff", 0.18),
+          width: 1.6,
+          opacity: 0.9,
+        },
+        emphasis: { focus: "series" },
+        data,
+        z: 14,
+        zlevel: 1,
+      };
+    }).filter((s) => s.data.length > 0)
+    : [];
+  const series = [...pointSeriesSorted, ...sharesLineSeries, ...markerSeries];
   const legendNames = [
     ...pointSeriesSorted.map((s) => s.name),
-    ...(buyData.length > 0 ? ["BUY"] : []),
-    ...(sellData.length > 0 ? ["SELL"] : []),
+    ...sharesLineSeries.map((s) => s.name),
+    ...markerSeries.map((s) => s.name),
   ];
+  eventSharesSeriesCache = sharesLineSeries.map((s) => ({ name: s.name, data: s.data }));
 
+  chart.clear();
   chart.setOption({
     animation: false,
     grid: { left: 56, right: 18, top: 48, bottom: 64 },
@@ -337,22 +462,39 @@ function drawEventPriceSeries(seriesList, tradeMarkers = []) {
       axisPointer: { type: "cross" },
       formatter: (params) => {
         if (!Array.isArray(params) || params.length === 0) return "";
-        const tsMs = params[0]?.axisValue;
-        const title = typeof tsMs === "number" ? new Date(tsMs).toLocaleString() : "";
+        const tsRaw = params[0]?.axisValue ?? params[0]?.axisValueLabel ?? params[0]?.value?.[0];
+        let tsMs = normalizeAxisTsMs(tsRaw);
+        if (!Number.isFinite(tsMs)) {
+          for (const item of params) {
+            const cand = normalizeAxisTsMs(item?.value?.[0]);
+            if (Number.isFinite(cand)) {
+              tsMs = cand;
+              break;
+            }
+          }
+        }
+        const title = Number.isFinite(tsMs) ? formatTsMsUtc(tsMs) : "";
         const lines = [title];
         for (const s of eventPriceLineSeriesCache) {
           const val = readNearestPrice(s.data, tsMs);
           lines.push(`${s.name}: ${val === null ? "-" : Number(val).toFixed(4)}`);
         }
+        for (const s of eventSharesSeriesCache) {
+          const val = readNearestPrice(s.data, tsMs);
+          lines.push(`${s.name}: ${val === null ? "-" : Number(val).toFixed(4)}`);
+        }
+        const markerLines = [];
         for (const item of params) {
           if (item.seriesType !== "scatter") continue;
           const meta = item?.data?.meta;
           if (meta && typeof meta === "object") {
             const size = typeof meta.size === "number" ? ` size=${meta.size.toFixed(2)}` : "";
             const outcome = meta.outcome ? ` ${meta.outcome}` : "";
-            lines.push(`${item.marker}${item.seriesName}${outcome}${size}`);
+            const price = Number.isFinite(meta.price) ? ` @${Number(meta.price).toFixed(4)}` : "";
+            markerLines.push(`${item.marker}${item.seriesName}${outcome}${price}${size}`);
           }
         }
+        if (markerLines.length > 0) lines.push(...markerLines);
         return lines.join("<br/>");
       },
     },
@@ -361,23 +503,63 @@ function drawEventPriceSeries(seriesList, tradeMarkers = []) {
       name: "时间",
       nameLocation: "middle",
       nameGap: 36,
-      axisLabel: { hideOverlap: true },
-    },
-    yAxis: {
-      type: "value",
-      name: "价格",
-      min: 0,
-      max: 1,
       axisLabel: {
-        formatter: (val) => Number(val).toFixed(2),
+        hideOverlap: true,
+        formatter: (val) => {
+          if (!Number.isFinite(val)) return "";
+          const s = formatTsMsUtc(val);
+          return s.slice(5, 16);
+        },
       },
     },
+    yAxis: [
+      {
+        type: "value",
+        name: "价格",
+        min: 0,
+        max: 1,
+        axisLabel: {
+          formatter: (val) => Number(val).toFixed(2),
+        },
+      },
+      {
+        type: "value",
+        name: "持仓份额",
+        position: "right",
+        axisLabel: {
+          formatter: (val) => Number(val).toFixed(2),
+        },
+        splitLine: { show: false },
+      },
+    ],
     dataZoom: [
       { type: "inside", xAxisIndex: 0, filterMode: "none" },
       { type: "slider", xAxisIndex: 0, bottom: 20, filterMode: "none" },
     ],
     series,
-  }, true);
+  }, {
+    notMerge: true,
+    lazyUpdate: false,
+    replaceMerge: ["series", "xAxis", "yAxis", "legend", "dataZoom"],
+  });
+}
+
+function syncEventPriceCollapsedUI() {
+  const card = eventPriceSection?.querySelector(".chart-card");
+  if (card) {
+    card.classList.toggle("collapsed", state.eventPriceCollapsed);
+  }
+  if (eventPriceToggleBtn) {
+    eventPriceToggleBtn.textContent = state.eventPriceCollapsed ? "展开图表" : "收起图表";
+  }
+}
+
+function waitNextPaint() {
+  return new Promise((resolve) => {
+    window.requestAnimationFrame(() => {
+      window.requestAnimationFrame(resolve);
+    });
+  });
 }
 
 function clearEventPriceHint(msg) {
@@ -401,6 +583,9 @@ function clearEventPriceHint(msg) {
 }
 
 async function loadEventPriceChart() {
+  if (state.eventPriceCollapsed) {
+    return;
+  }
   if (!state.user || !state.endpoint || state.endpoint !== "activity") {
     clearEventPriceHint("仅 activity 页面支持");
     return;
@@ -497,8 +682,66 @@ async function loadEventPriceChart() {
     const sourceDesc = Object.entries(sourceCounter)
       .map(([k, v]) => `${k}:${v}`)
       .join(" / ");
-    if (eventPriceMeta) eventPriceMeta.textContent = `系列 ${series.length} 条(${sourceDesc})，展示点 ${pointsTotal} 个`;
-    drawEventPriceSeries(series, tradeMarkers);
+    const positionByToken = new Map();
+    const conditionTokens = new Map();
+    const orderedRows = [...(state.lastRows || [])].sort((a, b) => {
+      const ta = readRowTs(a);
+      const tb = readRowTs(b);
+      return (ta ?? 0) - (tb ?? 0);
+    });
+    let lastTradeTs = null;
+    for (const row of orderedRows) {
+      if (!row || typeof row !== "object") continue;
+      const rowCondition = String(row.conditionId || "").trim().toLowerCase();
+      const rowSlug = String(row.eventSlug || row.slug || "").trim().toLowerCase();
+      if (conditionId && rowCondition && rowCondition !== conditionId) continue;
+      if (eventSlug && rowSlug && rowSlug !== eventSlug) continue;
+      const ts = readRowTs(row);
+      if (!Number.isFinite(ts)) continue;
+      const actionType = String(row.type || "").trim().toUpperCase();
+      const side = String(row.side || "").trim().toUpperCase();
+      const tokenId = String(row.asset || "").trim();
+      const size = toFiniteNumber(row.size);
+      if (actionType === "TRADE" && (side === "BUY" || side === "SELL")) {
+        lastTradeTs = lastTradeTs === null ? ts : Math.max(lastTradeTs, ts);
+        if (!tokenId || size === null) continue;
+        const delta = side === "BUY" ? size : -size;
+        if (!positionByToken.has(tokenId)) {
+          positionByToken.set(tokenId, { token_id: tokenId, token_alias: tokenId.slice(0, 8), current: 0, points: [] });
+        }
+        if (rowCondition) {
+          if (!conditionTokens.has(rowCondition)) conditionTokens.set(rowCondition, new Set());
+          conditionTokens.get(rowCondition).add(tokenId);
+        }
+        const entry = positionByToken.get(tokenId);
+        entry.current += delta;
+        entry.points.push({ ts, shares: entry.current });
+        continue;
+      }
+      if (actionType === "REDEEM" && rowCondition) {
+        const touched = conditionTokens.get(rowCondition);
+        if (!touched) continue;
+        for (const t of touched) {
+          const entry = positionByToken.get(t);
+          if (!entry) continue;
+          entry.current = 0;
+          entry.points.push({ ts, shares: 0 });
+        }
+      }
+    }
+    const sharesCutoffHours = 4;
+    const cutoffTs = Number.isFinite(lastTradeTs) ? lastTradeTs + sharesCutoffHours * 3600 : null;
+    const positionSeries = Array.from(positionByToken.values()).map((v) => ({
+      token_id: v.token_id,
+      token_alias: v.token_alias,
+      points: (Array.isArray(v.points) ? v.points : [])
+        .filter((p) => typeof p?.ts === "number" && typeof p?.shares === "number")
+        .filter((p) => (cutoffTs === null ? true : p.ts <= cutoffTs)),
+    }));
+    if (eventPriceMeta) {
+      eventPriceMeta.textContent = `系列 ${series.length} 条(${sourceDesc})，展示点 ${pointsTotal} 个；持仓线 ${positionSeries.length} 条`;
+    }
+    drawEventPriceSeries(series, tradeMarkers, positionSeries);
   } catch {
     clearEventPriceHint("价格数据加载失败");
   }
@@ -635,49 +878,7 @@ function sortRows(rows) {
 
 
 function orderColumns(columns) {
-  const preferred = [
-    "timestamp",
-    "createdAt",
-    "created_at",
-    "time",
-    "type",
-    "action",
-    "title",
-    "market",
-    "slug",
-    "eventSlug",
-    "eventId",
-    "conditionId",
-    "outcome",
-    "outcomeIndex",
-    "side",
-    "shares_summary",
-    "price",
-    "avgPrice",
-    "size",
-    "usdcSize",
-    "value",
-    "initialValue",
-    "currentValue",
-    "cashPnl",
-    "pnl",
-    "percentPnl",
-    "realizedPnl",
-    "percentRealizedPnl",
-    "resolvedAt",
-  ];
-  const seen = new Set();
-  const ordered = [];
-  preferred.forEach((key) => {
-    if (columns.includes(key)) {
-      ordered.push(key);
-      seen.add(key);
-    }
-  });
-  columns.forEach((key) => {
-    if (!seen.has(key)) ordered.push(key);
-  });
-  return ordered;
+  return [...columns].sort((a, b) => String(a).localeCompare(String(b)));
 }
 
 function toNumber(val) {
@@ -698,6 +899,24 @@ function normalizeOutcomeIndex(raw) {
 function formatShares(val) {
   const text = Number(val).toFixed(2).replace(/\.?0+$/, "");
   return text === "-0" ? "0" : text;
+}
+
+function parseSharesSummaryText(text) {
+  const out = new Map();
+  const raw = String(text || "").trim();
+  if (!raw) return out;
+  const parts = raw.split(",");
+  for (const part of parts) {
+    const seg = String(part || "").trim();
+    if (!seg) continue;
+    const idx = seg.indexOf(":");
+    if (idx <= 0) continue;
+    const label = seg.slice(0, idx).trim().toLowerCase();
+    const val = toFiniteNumber(seg.slice(idx + 1).trim());
+    if (!label || val === null) continue;
+    out.set(label, val);
+  }
+  return out;
 }
 
 function estimateSharesSummaryForPage(rows) {
@@ -921,7 +1140,7 @@ function buildTable(rows, columnsOverride) {
         state.sortDirection = "asc";
       }
       buildTable(state.lastRows, state.lastColumns);
-      persistColumnState();
+      markConfigDirty();
     });
     if (col !== "#") {
       const resizer = document.createElement("span");
@@ -986,6 +1205,10 @@ function storageKey() {
 
 async function persistColumnState() {
   if (!state.user || !state.endpoint) return;
+  if (state.activeConfig === "默认") {
+    state.activeConfig = "自定义";
+    refreshConfigSelect();
+  }
   const payload = {
     name: state.activeConfig,
     visible: Array.from(state.visibleColumns),
@@ -1011,10 +1234,27 @@ async function persistColumnState() {
   }
 }
 
+function markConfigDirty() {
+  if (savedHint) {
+    savedHint.textContent = state.activeConfig === "默认" ? "未保存（已偏离默认）" : "未保存";
+  }
+}
+
 function loadColumnState() {
   const configs = state.configs || {};
   try {
-    const payload = configs[state.activeConfig] || configs["默认"];
+    if (state.activeConfig === "默认") {
+      state.visibleColumns = new Set();
+      state.columnFilters = {};
+      state.sortColumn = "";
+      state.sortDirection = "asc";
+      state.columnOrder = [];
+      state.columnWidths = {};
+      state.forceAllColumns = true;
+      if (savedHint) savedHint.textContent = "默认配置";
+      return;
+    }
+    const payload = configs[state.activeConfig];
     if (!payload) return;
     if (payload.visible && payload.visible.length > 0) {
       state.visibleColumns = new Set(payload.visible);
@@ -1042,7 +1282,7 @@ function renderColumnControls(columns) {
     state.columnFilters[col] = value.trim();
     state.offset = 0;
     await loadRecords();
-    persistColumnState();
+    markConfigDirty();
   }, 300);
   const ordered = state.columnOrder.length > 0
     ? state.columnOrder.filter((col) => columns.includes(col))
@@ -1068,7 +1308,7 @@ function renderColumnControls(columns) {
         state.visibleColumns.delete(col);
       }
       buildTable(state.lastRows, state.lastColumns);
-      persistColumnState();
+      markConfigDirty();
     });
 
     const label = document.createElement("label");
@@ -1203,15 +1443,10 @@ async function loadRecords() {
         }
       }
     }
-    if (columnsUpdated) {
-      persistColumnState();
-    }
     buildTable(state.lastRows, state.lastColumns);
     await loadEventPriceChart();
-    if (columnGrid.dataset.columnsKey !== state.lastColumnsKey || columnGrid.children.length === 0) {
-      renderColumnControls(state.lastColumns);
-      columnGrid.dataset.columnsKey = state.lastColumnsKey;
-    }
+    renderColumnControls(state.lastColumns);
+    columnGrid.dataset.columnsKey = state.lastColumnsKey;
     await loadSummary();
     await loadEndpointSummary();
   } finally {
@@ -1248,15 +1483,39 @@ resetBtn.addEventListener("click", async () => {
 
 if (eventPriceApplyBtn) {
   eventPriceApplyBtn.addEventListener("click", async () => {
+    if (state.eventPriceCollapsed) return;
     getEventPriceMaxPoints();
-    await loadEventPriceChart();
+    await reloadEventChartCanvasData();
   });
 }
 
 if (eventPriceMaxPointsInput) {
   eventPriceMaxPointsInput.addEventListener("change", async () => {
+    if (state.eventPriceCollapsed) return;
     getEventPriceMaxPoints();
-    await loadEventPriceChart();
+    await reloadEventChartCanvasData();
+  });
+}
+
+if (eventPriceClearBtn) {
+  eventPriceClearBtn.addEventListener("click", () => {
+    const chart = ensureEventChart();
+    if (!chart) return;
+    chart.clear();
+    if (eventPriceMeta) eventPriceMeta.textContent = "画布已清除，可点击“重新加载画布数据”";
+  });
+}
+
+if (eventPriceToggleBtn) {
+  eventPriceToggleBtn.addEventListener("click", async () => {
+    state.eventPriceCollapsed = !state.eventPriceCollapsed;
+    syncEventPriceCollapsedUI();
+    if (!state.eventPriceCollapsed) {
+      await waitNextPaint();
+      if (eventPriceChartInstance) eventPriceChartInstance.resize();
+      await loadEventPriceChart();
+      if (eventPriceChartInstance) eventPriceChartInstance.resize();
+    }
   });
 }
 
@@ -1311,8 +1570,8 @@ userSelect.addEventListener("change", async (e) => {
   await loadEndpoints();
   await loadMetrics();
   await loadSummary();
-  await loadConfigs();
   restoreViewStateForCurrentTarget();
+  refreshConfigSelect();
   applyLayoutState(carryLayout);
   await loadRecords();
 });
@@ -1344,25 +1603,29 @@ showAllBtn.addEventListener("click", async () => {
   state.visibleColumns = new Set(state.lastColumns);
   state.forceAllColumns = false;
   buildTable(state.lastRows, state.lastColumns);
-  persistColumnState();
+  renderColumnControls(state.lastColumns);
+  columnGrid.dataset.columnsKey = state.lastColumnsKey;
+  markConfigDirty();
 });
 
 hideAllBtn.addEventListener("click", async () => {
   state.visibleColumns = new Set();
   state.forceAllColumns = false;
   buildTable(state.lastRows, state.lastColumns);
-  persistColumnState();
+  renderColumnControls(state.lastColumns);
+  columnGrid.dataset.columnsKey = state.lastColumnsKey;
+  markConfigDirty();
 });
 
 clearFiltersBtn.addEventListener("click", async () => {
   state.columnFilters = {};
   clearViewForLoading("清除筛选中...");
   await loadRecords();
-  persistColumnState();
+  markConfigDirty();
 });
 
-saveConfigBtn.addEventListener("click", () => {
-  persistColumnState();
+saveConfigBtn.addEventListener("click", async () => {
+  await persistColumnState();
 });
 
 function refreshConfigSelect() {
@@ -1370,6 +1633,7 @@ function refreshConfigSelect() {
   configSelect.innerHTML = "";
   const names = Object.keys(configs);
   if (!names.includes("默认")) names.unshift("默认");
+  if (!names.includes(state.activeConfig)) names.push(state.activeConfig);
   names.forEach((name) => {
     const opt = document.createElement("option");
     opt.value = name;
@@ -1386,20 +1650,20 @@ configSelect.addEventListener("change", async (e) => {
   await loadRecords();
 });
 
-saveAsBtn.addEventListener("click", () => {
+saveAsBtn.addEventListener("click", async () => {
   const name = window.prompt("请输入配置名称");
   if (!name) return;
   state.activeConfig = name;
-  persistColumnState();
+  await persistColumnState();
   refreshConfigSelect();
 });
 
-deleteConfigBtn.addEventListener("click", () => {
+deleteConfigBtn.addEventListener("click", async () => {
   if (!state.configs) return;
   const name = state.activeConfig;
   delete state.configs[name];
   state.activeConfig = "默认";
-  fetchJson(`/api/user/${state.user}/configs`, {
+  await fetchJson(`/api/user/${state.user}/configs`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
@@ -1470,7 +1734,7 @@ function enableDragAndDrop() {
       );
       state.columnOrder = newOrder;
       buildTable(state.lastRows, state.lastColumns);
-      persistColumnState();
+      markConfigDirty();
     });
   });
 }
@@ -1503,7 +1767,7 @@ function enableHeaderDrag() {
       order.splice(to, 0, order.splice(from, 1)[0]);
       state.columnOrder = order;
       buildTable(state.lastRows, state.lastColumns);
-      persistColumnState();
+      markConfigDirty();
     });
   });
 }
@@ -1520,13 +1784,14 @@ function startResize(e, th, col) {
   function onUp() {
     document.removeEventListener("mousemove", onMove);
     document.removeEventListener("mouseup", onUp);
-    persistColumnState();
+    markConfigDirty();
   }
   document.addEventListener("mousemove", onMove);
   document.addEventListener("mouseup", onUp);
 }
 
 (async function init() {
+  syncEventPriceCollapsedUI();
   window.addEventListener("resize", () => {
     if (eventPriceChartInstance) eventPriceChartInstance.resize();
   });

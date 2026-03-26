@@ -1,0 +1,241 @@
+{
+  "users": {
+    "u1": {
+      "activity": {
+        "active": "默认",
+        "configs": {
+          "默认": {
+            "name": "默认",
+            "x": 1
+          }
+        }
+      }
+    },
+    "0x1ea6aab09d4b9b504fa24f961f0c6709efb72f5d": {
+      "activity": {
+        "active": "aaa",
+        "configs": {
+          "aaa": {
+            "name": "aaa",
+            "visible": [
+              "proxyWallet",
+              "timestamp",
+              "conditionId",
+              "type",
+              "size",
+              "usdcSize",
+              "transactionHash",
+              "price",
+              "asset",
+              "side",
+              "outcomeIndex",
+              "title",
+              "slug",
+              "icon",
+              "eventSlug",
+              "outcome",
+              "name",
+              "pseudonym",
+              "shares_summary"
+            ],
+            "filters": {},
+            "sortColumn": "",
+            "sortDirection": "asc",
+            "columnOrder": [
+              "timestamp",
+              "type",
+              "title",
+              "slug",
+              "eventSlug",
+              "conditionId",
+              "outcome",
+              "outcomeIndex",
+              "side",
+              "shares_summary",
+              "price",
+              "size",
+              "usdcSize",
+              "proxyWallet",
+              "transactionHash",
+              "asset",
+              "icon",
+              "name",
+              "pseudonym",
+              "bio",
+              "profileImage",
+              "profileImageOptimized"
+            ],
+            "columnWidths": {},
+            "savedAt": 1774529857598
+          }
+        }
+      }
+    },
+    "0x2005d16a84ceefa912d4e380cd32e7ff827875ea": {
+      "activity": {
+        "active": "aaa",
+        "configs": {
+          "rn": {
+            "name": "rn",
+            "visible": [
+              "proxyWallet",
+              "timestamp",
+              "conditionId",
+              "type",
+              "size",
+              "usdcSize",
+              "transactionHash",
+              "price",
+              "asset",
+              "side",
+              "outcomeIndex",
+              "title",
+              "slug",
+              "icon",
+              "eventSlug",
+              "outcome",
+              "name",
+              "pseudonym",
+              "bio",
+              "shares_summary"
+            ],
+            "filters": {},
+            "sortColumn": "",
+            "sortDirection": "asc",
+            "columnOrder": [
+              "timestamp",
+              "type",
+              "title",
+              "slug",
+              "eventSlug",
+              "conditionId",
+              "outcome",
+              "outcomeIndex",
+              "side",
+              "shares_summary",
+              "price",
+              "size",
+              "usdcSize",
+              "proxyWallet",
+              "transactionHash",
+              "asset",
+              "icon",
+              "name",
+              "pseudonym",
+              "bio",
+              "profileImage",
+              "profileImageOptimized"
+            ],
+            "columnWidths": {},
+            "savedAt": 1774529486167
+          },
+          "aaa": {
+            "name": "aaa",
+            "visible": [
+              "proxyWallet",
+              "timestamp",
+              "conditionId",
+              "type",
+              "size",
+              "usdcSize",
+              "transactionHash",
+              "price",
+              "asset",
+              "side",
+              "outcomeIndex",
+              "title",
+              "slug",
+              "icon",
+              "eventSlug",
+              "outcome",
+              "name",
+              "shares_summary"
+            ],
+            "filters": {},
+            "sortColumn": "",
+            "sortDirection": "asc",
+            "columnOrder": [
+              "timestamp",
+              "type",
+              "title",
+              "slug",
+              "eventSlug",
+              "conditionId",
+              "outcome",
+              "outcomeIndex",
+              "side",
+              "shares_summary",
+              "price",
+              "size",
+              "usdcSize",
+              "proxyWallet",
+              "transactionHash",
+              "asset",
+              "icon",
+              "name",
+              "pseudonym",
+              "bio",
+              "profileImage",
+              "profileImageOptimized"
+            ],
+            "columnWidths": {},
+            "savedAt": 1774529768161
+          }
+        }
+      }
+    }
+  },
+  "endpoints": {
+    "activity": {
+      "active": "aaa",
+      "configs": {
+        "aaa": {
+          "name": "aaa",
+          "visible": [
+            "timestamp",
+            "type",
+            "size",
+            "usdcSize",
+            "price",
+            "side",
+            "title",
+            "slug",
+            "eventSlug",
+            "outcome",
+            "shares_summary",
+            "icon"
+          ],
+          "filters": {},
+          "sortColumn": "",
+          "sortDirection": "asc",
+          "columnOrder": [
+            "timestamp",
+            "icon",
+            "title",
+            "asset",
+            "bio",
+            "conditionId",
+            "eventSlug",
+            "slug",
+            "type",
+            "name",
+            "side",
+            "size",
+            "outcome",
+            "outcomeIndex",
+            "price",
+            "profileImage",
+            "profileImageOptimized",
+            "proxyWallet",
+            "pseudonym",
+            "transactionHash",
+            "usdcSize",
+            "shares_summary"
+          ],
+          "columnWidths": {},
+          "savedAt": 1774531003979
+        }
+      }
+    }
+  }
+}

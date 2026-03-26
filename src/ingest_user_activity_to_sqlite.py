@@ -2,9 +2,7 @@
 """Ingest user endpoint JSON pages into SQLite for fast dashboard queries.
 
 Example:
-  python3 src/ingest_user_activity_to_sqlite.py \
-    --data-dir data/polymarket/user_activities \
-    --db-path data/polymarket/user_activities/dashboard.db
+  python3 src/ingest_user_activity_to_sqlite.py
 """
 
 from __future__ import annotations
@@ -34,10 +32,8 @@ def parse_args() -> argparse.Namespace:
         help="SQLite database output path",
     )
     parser.add_argument(
-        "--users",
-        nargs="*",
-        default=None,
-        help="Optional list of user addresses to ingest; default ingests all users under data-dir",
+        "--user-id",
+        help="Only ingest this user id (e.g. 0xabc...). If omitted, ingest all discovered users.",
     )
     return parser.parse_args()
 
@@ -238,18 +234,38 @@ def upsert_file_state(
     )
 
 
-def ingest_endpoint(conn: sqlite3.Connection, data_dir: Path, user: str, endpoint: str) -> Tuple[int, int]:
+def clear_user_data(conn: sqlite3.Connection, user: str) -> None:
+    conn.execute("DELETE FROM records WHERE user = ?", (user,))
+    conn.execute("DELETE FROM endpoint_columns WHERE user = ?", (user,))
+    conn.execute("DELETE FROM ingest_state WHERE user = ?", (user,))
+
+
+def ingest_endpoint(conn: sqlite3.Connection, data_dir: Path, user: str, endpoint: str) -> Tuple[int, int, int, int]:
     files = resolve_endpoint_files(data_dir, user, endpoint)
     known_columns, next_ord = load_known_columns(conn, user, endpoint)
     scanned = 0
     inserted = 0
-    for path in files:
+    files_total = len(files)
+    skipped_unchanged = 0
+    processed_files = 0
+    print(
+        f"[ingest:start] user={user} endpoint={endpoint} files_total={files_total}",
+        flush=True,
+    )
+    for idx, path in enumerate(files, start=1):
         if not path.exists() or not path.is_file():
             continue
         st = path.stat()
         key = str(path.resolve())
         prev = file_state(conn, user, endpoint, key)
         if prev and prev == (st.st_mtime_ns, st.st_size):
+            skipped_unchanged += 1
+            if idx % 50 == 0 or idx == files_total:
+                print(
+                    f"[ingest:file] user={user} endpoint={endpoint} progress={idx}/{files_total} "
+                    f"processed_files={processed_files} skipped_unchanged={skipped_unchanged}",
+                    flush=True,
+                )
             continue
         for row in iter_rows_from_files([path]):
             scanned += 1
@@ -281,7 +297,15 @@ def ingest_endpoint(conn: sqlite3.Connection, data_dir: Path, user: str, endpoin
                 known_columns.add(str(key_name))
                 next_ord += 1
         upsert_file_state(conn, user, endpoint, key, st.st_mtime_ns, st.st_size)
-    return scanned, inserted
+        processed_files += 1
+        if idx % 10 == 0 or idx == files_total:
+            print(
+                f"[ingest:file] user={user} endpoint={endpoint} progress={idx}/{files_total} "
+                f"processed_files={processed_files} skipped_unchanged={skipped_unchanged} "
+                f"scanned={scanned} inserted={inserted}",
+                flush=True,
+            )
+    return scanned, inserted, processed_files, skipped_unchanged
 
 
 def main() -> None:
@@ -298,23 +322,35 @@ def main() -> None:
         "traded_markets",
         "positions_value",
     ]
-    users = args.users if args.users else list_users(data_dir)
+    users = list_users(data_dir)
+    if args.user_id:
+        users = [u for u in users if u == args.user_id]
+        if not users:
+            print(f"User not found under {data_dir}: {args.user_id}")
+            return
     if not users:
         print(f"No users found under {data_dir}")
         return
 
     with sqlite3.connect(db_path) as conn:
         init_db(conn)
+        if args.user_id:
+            clear_user_data(conn, args.user_id)
+            conn.commit()
+            print(f"[reset] cleared existing data for user={args.user_id}", flush=True)
         total_scanned = 0
         total_inserted = 0
         for user in users:
             for endpoint in endpoints:
-                scanned, inserted = ingest_endpoint(conn, data_dir, user, endpoint)
+                scanned, inserted, processed_files, skipped_unchanged = ingest_endpoint(
+                    conn, data_dir, user, endpoint
+                )
                 conn.commit()
                 total_scanned += scanned
                 total_inserted += inserted
                 print(
-                    f"[ingest] user={user} endpoint={endpoint} scanned={scanned} inserted={inserted}",
+                    f"[ingest] user={user} endpoint={endpoint} scanned={scanned} inserted={inserted} "
+                    f"processed_files={processed_files} skipped_unchanged={skipped_unchanged}",
                     flush=True,
                 )
     print(
