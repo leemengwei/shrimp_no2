@@ -223,15 +223,14 @@ function ensureEventChart() {
   if (!eventPriceChart) return null;
   if (typeof window.echarts === "undefined") return null;
   if (!eventPriceChartInstance) {
-    eventPriceChartInstance = window.echarts.init(eventPriceChart);
+    eventPriceChartInstance = window.echarts.init(eventPriceChart, null, { renderer: "svg" });
   }
   return eventPriceChartInstance;
 }
 
 function disposeEventChart() {
-  if (!eventPriceChartInstance) return;
   try {
-    eventPriceChartInstance.dispose();
+    if (eventPriceChartInstance) eventPriceChartInstance.dispose();
   } catch {
     // ignore dispose errors and rebuild lazily
   }
@@ -295,10 +294,7 @@ function drawEventPriceSeries(seriesList, tradeMarkers = [], positionSeries = []
   for (const item of normalized) {
     const tokenId = String(item?.token_id || "").trim();
     if (!tokenId) continue;
-    if (!tokenAliasMap.has(tokenId)) {
-      tokenAliasMap.set(tokenId, `token${tokenIdx}`);
-      tokenIdx += 1;
-    }
+    if (!tokenAliasMap.has(tokenId)) tokenAliasMap.set(tokenId, `token${tokenIdx++}`);
   }
   const tokenStyleMap = new Map();
   for (const [tokenId, alias] of tokenAliasMap.entries()) {
@@ -314,33 +310,28 @@ function drawEventPriceSeries(seriesList, tradeMarkers = [], positionSeries = []
       sellColor: mixHex(base, "#000000", 0.18),
     });
   }
+
   const pointSeries = normalized.map((item, idx) => {
-    const points = Array.isArray(item.points) ? item.points : [];
-    const data = points
-      .filter((p) => typeof p.ts === "number" && typeof p.price === "number")
-      .map((p) => [p.ts * 1000, p.price])
-      .sort((a, b) => a[0] - b[0]);
-    const source = String(item.source || "").trim().toLowerCase();
-    const tokenId = String(item.token_id || "").trim();
+    const tokenId = String(item?.token_id || "").trim();
     const tokenAlias = tokenAliasMap.get(tokenId) || `token${idx + 1}`;
     const style = tokenStyleMap.get(tokenId) || {
-      base: "#7f8c8d",
       clobBorder: "#7f8c8d",
       clobFill: "rgba(127,140,141,0.12)",
       tradesBorder: "#5f6c6d",
       tradesFill: "rgba(127,140,141,0.55)",
-      buyColor: "#9aa7a8",
-      sellColor: "#5f6c6d",
     };
+    const source = String(item.source || "").trim().toLowerCase();
     const isTrades = source === "trades";
-    const displayName = `${tokenAlias}(${source || "unknown"})`;
+    const data = (Array.isArray(item.points) ? item.points : [])
+      .filter((pt) => typeof pt.ts === "number" && typeof pt.price === "number")
+      .map((pt) => [pt.ts * 1000, pt.price])
+      .sort((a, b) => a[0] - b[0]);
     return {
-      name: displayName,
+      name: `${tokenAlias}(${source || "unknown"})`,
       source,
       tokenId,
-      tokenAlias,
       type: "scatter",
-      progressive: 0,
+      yAxisIndex: 0,
       symbol: "circle",
       symbolSize: isTrades ? 10 : 5,
       itemStyle: {
@@ -348,20 +339,43 @@ function drawEventPriceSeries(seriesList, tradeMarkers = [], positionSeries = []
         borderColor: isTrades ? style.tradesBorder : style.clobBorder,
         borderWidth: isTrades ? 1.5 : 1,
       },
-      z: isTrades ? 6 : 12,
-      zlevel: 1,
       data,
+      z: isTrades ? 5 : 7,
+      zlevel: 0,
+      progressive: 0,
     };
-  }).filter((s) => s.data.length > 0);
-
-  const pointSeriesSorted = pointSeries.sort((a, b) => {
-    const aTrades = a.source === "trades" ? 0 : 1;
-    const bTrades = b.source === "trades" ? 0 : 1;
-    if (aTrades !== bTrades) return aTrades - bTrades;
+  }).filter((s) => s.data.length > 0).sort((a, b) => {
+    const at = a.source === "trades" ? 0 : 1;
+    const bt = b.source === "trades" ? 0 : 1;
+    if (at !== bt) return at - bt;
     return String(a.name).localeCompare(String(b.name));
   });
+  eventPriceLineSeriesCache = pointSeries.map((s) => ({ name: s.name, data: s.data }));
 
-  eventPriceLineSeriesCache = pointSeriesSorted.map((s) => ({ name: s.name, data: s.data }));
+  const sharesLineSeries = (Array.isArray(positionSeries) ? positionSeries : []).map((item) => {
+    const tokenId = String(item?.token_id || "").trim();
+    const tokenAlias = tokenAliasMap.get(tokenId) || String(item?.token_alias || tokenId.slice(0, 8) || "token");
+    const style = tokenStyleMap.get(tokenId) || { base: "#7f8c8d" };
+    const data = (Array.isArray(item?.points) ? item.points : [])
+      .filter((pt) => typeof pt?.ts === "number" && typeof pt?.shares === "number")
+      .map((pt) => [pt.ts * 1000, pt.shares])
+      .sort((a, b) => a[0] - b[0]);
+    return {
+      name: `${tokenAlias}(shares)`,
+      type: "line",
+      yAxisIndex: 1,
+      step: "end",
+      showSymbol: false,
+      smooth: false,
+      lineStyle: { color: mixHex(style.base, "#ffffff", 0.18), width: 1.4, opacity: 0.85 },
+      data,
+      z: 4,
+      zlevel: 0,
+      progressive: 0,
+    };
+  }).filter((s) => s.data.length > 0);
+  eventSharesSeriesCache = sharesLineSeries.map((s) => ({ name: s.name, data: s.data }));
+
   const markerByTokenSide = new Map();
   for (const marker of Array.isArray(tradeMarkers) ? tradeMarkers : []) {
     if (!marker || typeof marker !== "object") continue;
@@ -371,27 +385,16 @@ function drawEventPriceSeries(seriesList, tradeMarkers = [], positionSeries = []
     if (!tokenId || (side !== "BUY" && side !== "SELL")) continue;
     const tokenAlias = tokenAliasMap.get(tokenId) || tokenId.slice(0, 8) || "token";
     const key = `${tokenId}::${side}`;
-    if (!markerByTokenSide.has(key)) {
-      markerByTokenSide.set(key, { tokenId, tokenAlias, side, points: [] });
-    }
-    const point = {
-      value: [marker.ts * 1000, marker.price],
-      meta: { ...marker, tokenId, tokenAlias },
-    };
-    markerByTokenSide.get(key).points.push(point);
+    if (!markerByTokenSide.has(key)) markerByTokenSide.set(key, { tokenId, tokenAlias, side, tsList: [] });
+    markerByTokenSide.get(key).tsList.push(marker.ts * 1000);
   }
-  const markerSeries = Array.from(markerByTokenSide.values()).flatMap((g) => {
-    const style = tokenStyleMap.get(g.tokenId) || {
-      buyColor: "#9aa7a8",
-      sellColor: "#5f6c6d",
-    };
+  const markerSeries = Array.from(markerByTokenSide.values()).map((g) => {
+    const style = tokenStyleMap.get(g.tokenId) || { buyColor: "#9aa7a8", sellColor: "#5f6c6d" };
     const isBuy = g.side === "BUY";
-    const color = isBuy ? style.buyColor : style.sellColor;
-    const lineName = `${g.tokenAlias}(${g.side}-line)`;
-    const lineCarrier = {
-      name: lineName,
+    return {
+      name: `${g.tokenAlias}(${g.side}-line)`,
       type: "line",
-      progressive: 0,
+      yAxisIndex: 0,
       data: [],
       showSymbol: false,
       lineStyle: { opacity: 0 },
@@ -402,61 +405,27 @@ function drawEventPriceSeries(seriesList, tradeMarkers = [], positionSeries = []
         animation: false,
         label: { show: false },
         lineStyle: {
-          color,
+          color: isBuy ? style.buyColor : style.sellColor,
           width: isBuy ? 1.2 : 1.1,
           type: isBuy ? "solid" : "dashed",
           opacity: 0.5,
         },
-        data: g.points.map((p) => ({ xAxis: p.value[0] })),
+        data: g.tsList.map((x) => ({ xAxis: x })),
       },
-      z: 4,
+      z: 3,
       zlevel: 0,
+      progressive: 0,
     };
-    return [lineCarrier];
   });
-  const sharesLineSeries = Array.isArray(positionSeries)
-    ? positionSeries.map((item) => {
-      const tokenId = String(item?.token_id || "").trim();
-      const tokenAlias = tokenAliasMap.get(tokenId) || String(item?.token_alias || tokenId.slice(0, 8) || "token");
-      const style = tokenStyleMap.get(tokenId) || { base: "#7f8c8d" };
-      const points = Array.isArray(item?.points) ? item.points : [];
-      const data = points
-        .filter((p) => typeof p?.ts === "number" && typeof p?.shares === "number")
-        .map((p) => [p.ts * 1000, p.shares])
-        .sort((a, b) => a[0] - b[0]);
-      return {
-        name: `${tokenAlias}(shares)`,
-        type: "line",
-        progressive: 0,
-        yAxisIndex: 1,
-        step: "end",
-        showSymbol: false,
-        smooth: false,
-        lineStyle: {
-          color: mixHex(style.base, "#ffffff", 0.18),
-          width: 1.6,
-          opacity: 0.9,
-        },
-        emphasis: { focus: "series" },
-        data,
-        z: 14,
-        zlevel: 1,
-      };
-    }).filter((s) => s.data.length > 0)
-    : [];
-  const series = [...pointSeriesSorted, ...sharesLineSeries, ...markerSeries];
-  const legendNames = [
-    ...pointSeriesSorted.map((s) => s.name),
-    ...sharesLineSeries.map((s) => s.name),
-    ...markerSeries.map((s) => s.name),
-  ];
-  eventSharesSeriesCache = sharesLineSeries.map((s) => ({ name: s.name, data: s.data }));
 
-  chart.clear();
   chart.setOption({
     animation: false,
-    grid: { left: 56, right: 18, top: 48, bottom: 64 },
-    legend: { top: 8, type: "scroll", data: legendNames },
+    grid: { left: 56, right: 56, top: 48, bottom: 72 },
+    legend: {
+      top: 8,
+      type: "scroll",
+      data: [...pointSeries.map((s) => s.name), ...sharesLineSeries.map((s) => s.name), ...markerSeries.map((s) => s.name)],
+    },
     tooltip: {
       trigger: "axis",
       axisPointer: { type: "cross" },
@@ -483,18 +452,6 @@ function drawEventPriceSeries(seriesList, tradeMarkers = [], positionSeries = []
           const val = readNearestPrice(s.data, tsMs);
           lines.push(`${s.name}: ${val === null ? "-" : Number(val).toFixed(4)}`);
         }
-        const markerLines = [];
-        for (const item of params) {
-          if (item.seriesType !== "scatter") continue;
-          const meta = item?.data?.meta;
-          if (meta && typeof meta === "object") {
-            const size = typeof meta.size === "number" ? ` size=${meta.size.toFixed(2)}` : "";
-            const outcome = meta.outcome ? ` ${meta.outcome}` : "";
-            const price = Number.isFinite(meta.price) ? ` @${Number(meta.price).toFixed(4)}` : "";
-            markerLines.push(`${item.marker}${item.seriesName}${outcome}${price}${size}`);
-          }
-        }
-        if (markerLines.length > 0) lines.push(...markerLines);
         return lines.join("<br/>");
       },
     },
@@ -513,34 +470,18 @@ function drawEventPriceSeries(seriesList, tradeMarkers = [], positionSeries = []
       },
     },
     yAxis: [
-      {
-        type: "value",
-        name: "价格",
-        min: 0,
-        max: 1,
-        axisLabel: {
-          formatter: (val) => Number(val).toFixed(2),
-        },
-      },
-      {
-        type: "value",
-        name: "持仓份额",
-        position: "right",
-        axisLabel: {
-          formatter: (val) => Number(val).toFixed(2),
-        },
-        splitLine: { show: false },
-      },
+      { type: "value", name: "价格", min: 0, max: 1, position: "left", axisLabel: { formatter: (val) => Number(val).toFixed(2) } },
+      { type: "value", name: "持仓份额", position: "right", axisLabel: { formatter: (val) => Number(val).toFixed(2) }, splitLine: { show: false } },
     ],
     dataZoom: [
       { type: "inside", xAxisIndex: 0, filterMode: "none" },
       { type: "slider", xAxisIndex: 0, bottom: 20, filterMode: "none" },
     ],
-    series,
+    series: [...pointSeries, ...sharesLineSeries, ...markerSeries],
   }, {
     notMerge: true,
     lazyUpdate: false,
-    replaceMerge: ["series", "xAxis", "yAxis", "legend", "dataZoom"],
+    replaceMerge: ["series", "xAxis", "yAxis", "legend", "dataZoom", "tooltip", "grid"],
   });
 }
 
@@ -567,7 +508,6 @@ function clearEventPriceHint(msg) {
   if (eventPriceMeta) eventPriceMeta.textContent = msg;
   const chart = ensureEventChart();
   if (!chart) return;
-  chart.clear();
   chart.setOption({
     graphic: {
       type: "text",
@@ -579,6 +519,21 @@ function clearEventPriceHint(msg) {
         fontSize: 12,
       },
     },
+    grid: { left: 56, right: 56, top: 48, bottom: 72 },
+    xAxis: [{ type: "time" }],
+    yAxis: [
+      { type: "value", min: 0, max: 1, position: "left" },
+      { type: "value", position: "right" },
+    ],
+    dataZoom: [
+      { type: "inside", xAxisIndex: 0, filterMode: "none" },
+      { type: "slider", xAxisIndex: 0, bottom: 20, filterMode: "none" },
+    ],
+    series: [],
+  }, {
+    notMerge: true,
+    lazyUpdate: false,
+    replaceMerge: ["series", "graphic", "xAxis", "yAxis", "dataZoom", "grid"],
   });
 }
 
@@ -1499,9 +1454,8 @@ if (eventPriceMaxPointsInput) {
 
 if (eventPriceClearBtn) {
   eventPriceClearBtn.addEventListener("click", () => {
-    const chart = ensureEventChart();
-    if (!chart) return;
-    chart.clear();
+    disposeEventChart();
+    if (eventPriceChart) eventPriceChart.innerHTML = "";
     if (eventPriceMeta) eventPriceMeta.textContent = "画布已清除，可点击“重新加载画布数据”";
   });
 }
