@@ -122,9 +122,9 @@ def iter_activity_rows(activity_dir: Path) -> Iterable[Dict[str, Any]]:
                 yield row
 
 
-def load_user_actions(activity_dir: Path) -> Dict[Tuple[str, str, int], float]:
-    """Return signed shares by (condition_id, token_id, timestamp)."""
-    out: Dict[Tuple[str, str, int], float] = defaultdict(float)
+def load_user_actions(activity_dir: Path) -> Dict[Tuple[str, str], Dict[int, float]]:
+    """Return signed shares indexed by (condition_id, token_id) -> {timestamp: shares}."""
+    out: Dict[Tuple[str, str], Dict[int, float]] = defaultdict(lambda: defaultdict(float))
     for row in iter_activity_rows(activity_dir):
         if str(row.get("type") or "").strip().upper() != "TRADE":
             continue
@@ -138,7 +138,7 @@ def load_user_actions(activity_dir: Path) -> Dict[Tuple[str, str, int], float]:
         signed = size if side == "BUY" else (-size if side == "SELL" else 0.0)
         if signed == 0.0:
             continue
-        out[(cid, token_id, ts)] += signed
+        out[(cid, token_id)][ts] += signed
     return out
 
 
@@ -352,7 +352,9 @@ def main() -> None:
 
     log("loading activity actions...")
     actions = load_user_actions(activity_dir)
-    log(f"loaded action keys={len(actions)}")
+    action_pair_count = len(actions)
+    action_point_count = sum(len(v) for v in actions.values())
+    log(f"loaded action pairs={action_pair_count}, action points={action_point_count}")
 
     market_dirs = sorted([p for p in markets_dir.iterdir() if p.is_dir()])
     if args.max_markets > 0:
@@ -391,14 +393,10 @@ def main() -> None:
             | set(token1_clob_prices.keys())
             | set(token2_clob_prices.keys())
         )
-        action_ts_1 = {
-            ts for (cid, tid, ts), _v in actions.items() if cid == condition_id and tid == token1.token_id
-        }
-        action_ts_2 = {
-            ts for (cid, tid, ts), _v in actions.items() if cid == condition_id and tid == token2.token_id
-        }
-        ts_set |= action_ts_1
-        ts_set |= action_ts_2
+        token1_actions = actions.get((condition_id, token1.token_id), {})
+        token2_actions = actions.get((condition_id, token2.token_id), {})
+        ts_set |= set(token1_actions.keys())
+        ts_set |= set(token2_actions.keys())
 
         if not ts_set:
             skipped += 1
@@ -414,8 +412,8 @@ def main() -> None:
             t2_trade = token2_trades_prices.get(ts, "")
             t1_clob = token1_clob_prices.get(ts, "")
             t2_clob = token2_clob_prices.get(ts, "")
-            a1 = actions.get((condition_id, token1.token_id, ts), 0.0)
-            a2 = actions.get((condition_id, token2.token_id, ts), 0.0)
+            a1 = token1_actions.get(ts, 0.0)
+            a2 = token2_actions.get(ts, 0.0)
 
             changed = False
             if t1_trade != "":
